@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from douzero.dmc import belief, models
 from douzero.env import hand_belief as hb
 from douzero.env.env import _cards2array, get_obs
 from douzero.evaluation.deep_agent import DeepAgent
@@ -139,6 +140,54 @@ def test_douzero_adp_values_and_actions_are_identical_after_a_hidden_hand_swap(a
     assert min(checked[position] for position in SEAT_ORDER) >= 20, checked
 
 
+@pytest.fixture(scope='module')
+def belief_arms():
+    """Per seat, randomly initialized arms; M1 and M2c share one next-player predictor."""
+    torch.manual_seed(0)
+    arms = {}
+    for position in SEAT_ORDER:
+        next_predictor = models.HandPredictor(position, 1)
+        predictors = {'none': None, 'next': next_predictor, 'derived_both': next_predictor,
+                      'learned_both': models.HandPredictor(position, 2), 'oracle': None}
+        arms[position] = {hand_model: models.make_arm(position, hand_model, predictor)
+                          for hand_model, predictor in predictors.items()}
+    return arms
+
+
+def _arm_decision(arm, hand_model, infoset):
+    """Belief and Q-values of one arm at infoset, computed from the observation as an actor will."""
+    q_network, predictor = arm
+    obs = get_obs(infoset)
+    x_no_action = torch.from_numpy(obs['x_no_action']).float()[None]
+    probs = labels = None
+    with torch.no_grad():
+        if predictor is not None:
+            probs = predictor(torch.from_numpy(obs['z']).float()[None], x_no_action)['probs']
+        if hand_model == 'oracle':
+            labels = torch.from_numpy(hb.hand_labels(infoset))[None]
+        beliefs = belief.build_belief(hand_model, x_no_action, probs=probs, labels=labels)
+        values = q_network(torch.from_numpy(obs['z_batch']), torch.from_numpy(obs['x_batch']), return_value=True,
+                           belief=beliefs.expand(len(obs['legal_actions']), -1))['values']
+    return beliefs, values
+
+
+def test_belief_arm_decisions_are_identical_after_a_hidden_hand_swap(belief_arms, swaps):
+    for state, swapped in swaps[::10]:
+        arms = belief_arms[state['infoset'].player_position]
+        for hand_model in ('none', 'next', 'derived_both', 'learned_both'):
+            beliefs, values = _arm_decision(arms[hand_model], hand_model, state['infoset'])
+            swapped_beliefs, swapped_values = _arm_decision(arms[hand_model], hand_model, swapped)
+            assert torch.equal(swapped_beliefs, beliefs) and torch.equal(swapped_values, values), hand_model
+
+
+def test_the_oracle_arm_sees_the_hidden_hand_swap(belief_arms, swaps):
+    for state, swapped in swaps[::10]:
+        arm = belief_arms[state['infoset'].player_position]['oracle']
+        beliefs, _ = _arm_decision(arm, 'oracle', state['infoset'])
+        swapped_beliefs, _ = _arm_decision(arm, 'oracle', swapped)
+        assert not torch.equal(swapped_beliefs, beliefs)
+
+
 # ---------------------------------------------------------------- T6b: static audit of true-hand reads
 
 SOURCE_FILES = sorted(path.relative_to(REPO_ROOT).as_posix() for path in REPO_ROOT.rglob('*.py')
@@ -147,7 +196,8 @@ SOURCE_FILES = sorted(path.relative_to(REPO_ROOT).as_posix() for path in REPO_RO
 # Adding a file to these sets is a reviewed decision: that file can see the true hidden hands.
 MENTIONS_ALL_HANDCARDS = {'douzero/env/game.py',         # the engine fills InfoSet.all_handcards
                           'douzero/env/hand_belief.py'}  # hand_labels(), the only reader
-MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py'}    # later: predictor-data generation, oracle agent
+MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # later: predictor-data generation, oracle agent
+                        'trace_decision.py'}             # debug trace: shows the labels, runs the oracle arm
 
 
 def _files_mentioning(name):
@@ -162,3 +212,9 @@ def test_only_the_engine_and_hand_belief_mention_the_true_hands():
 
 def test_only_allow_listed_modules_mention_hand_labels():
     assert _files_mentioning('hand_labels') == MENTIONS_HAND_LABELS
+
+
+def test_only_the_engine_touches_its_own_state():
+    # Reaching past the InfoSet into the engine's per-seat state would also expose the hidden hands.
+    assert _files_mentioning('info_sets') == {'douzero/env/game.py'}
+    assert _files_mentioning('_env') == {'douzero/env/env.py'}

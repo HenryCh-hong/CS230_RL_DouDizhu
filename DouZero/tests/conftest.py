@@ -3,12 +3,15 @@ import sys
 
 import numpy as np
 import pytest
+import torch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from douzero.env.env import Env
+
+torch.set_num_threads(1)  # local tests stay single-threaded
 
 
 def play_random_games(num_games, seed):
