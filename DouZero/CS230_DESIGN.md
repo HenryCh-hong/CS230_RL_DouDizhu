@@ -274,6 +274,7 @@ Every stage should make the data flow, tensor shapes, losses and training behavi
 - **`docs/TRAINING_WALKTHROUGH.md`** (project root) walks through the pipeline in 22 steps. Each step names its file, function, tensor shapes, information class and gradient flow. It also has the arm comparison, the gradient-flow diagrams, and worked examples of the CE and Q-losses.
 - **`trace_decision.py`** prints one decision for every arm: observation shapes, predictor outputs against card counting, belief layouts, Q over the legal actions, and the epsilon-greedy choice. It is single-process and takes about a second.
 - **`trace_episode.py`** (stage 3) prints one full game of one arm and writes it to `debug/episode_trace.txt`. **`trace_learner_update.py`** (stage 3) prints one real learner update.
+- **`render_episode_replay.py` and `render_state_comparison.py`** (visualization prototype, `douzero/viz/`) write self-contained HTML pages: a step-by-step replay of one game, and one decision as all five arms see and score it. Teaching mode (`--reveal`) adds the true hands. See `../docs/VISUALIZATION_PLAN.md`. `douzero/viz/record.py` is an allow-listed caller of `oracle_labels`, and training never imports `douzero/viz`.
 - **Run directories** (stage 3) log `metrics.csv` every 5 s, one line per start in `attempts.jsonl`, and `summary.md` at the end of every start.
 - **Planned.** Predictor metrics in Stage 4, and plots under `artifacts/plots/` built from the raw `metrics.csv` of remote runs, never from the laptop.
 

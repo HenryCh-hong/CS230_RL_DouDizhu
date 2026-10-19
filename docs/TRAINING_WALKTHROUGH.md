@@ -777,3 +777,29 @@ PARAMETER CHANGE (L2 norm of new minus old weights)
 - **The belief columns moved off zero.** The Q-network started to use the belief.
 - **M0c shows the opposite.** With `--hand_model none`, the same trace shows both belief slots moving by exactly 0.000000, while every other layer moves by the same amount as here.
 - **The first step was big.** Q's mean jumped from 0.87 to 1.01 in a single step. That is the fresh-RMSprop effect described in step 19.
+
+## The visual tools: a game replay and a one-state comparison
+
+The text traces above have two HTML counterparts, which are easier to follow when you are learning.
+`docs/VISUALIZATION_PLAN.md` explains every part of them. Samples are in `docs/visualization/samples/`.
+
+- **`render_episode_replay.py`** records one game, played exactly as an actor plays it, and writes a
+  replay page. Step through it with ← →.
+  - The three seats sit around the public table.
+  - Each decision shows the arm's belief input next to card counting, the top 5 moves by Q, the
+    epsilon draw, and what changed.
+  - With `--reveal` (teaching mode) it also shows the true hands, with dashed orange borders, and
+    the belief's cross-entropy against them.
+- **`render_state_comparison.py`** rebuilds one decision of a recorded game and shows all five arms
+  on that same state:
+  - each arm's two belief slots, row by row;
+  - each arm's top 5 moves.
+
+**What the samples teach.**
+- **All five arms rank the moves identically before RL training.** The belief weights start at zero.
+- **M2c's derived slot has exactly the CE of its predicted slot.** The reflection gives the same
+  information in a new representation.
+- **Card counting may be a weak baseline late in the game.** On the sample game, a plain uniform
+  belief beats it on the 26 later decisions (CE 0.67 vs 0.79 nats), though not on the 5 early ones.
+  That is one game, so it is a hint, not a result. Stage 4 will report the uniform baseline too,
+  with CE by game phase.

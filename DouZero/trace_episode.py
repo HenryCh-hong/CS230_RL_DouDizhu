@@ -72,7 +72,7 @@ def expected_sizes(beliefs):
 
 def trace_episode(hand_model='derived_both', seed=0, predictor_dir=None, checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
                   exp_epsilon=0.01, model=None, predictors=None):
-    """Plays one game as actor 0 of a run with --seed seed would at its first start, and returns (text, record).
+    """Plays one game as actor 0 of a CPU-actor run with --seed seed would at its first start; returns (text, record).
 
     A resumed attempt reseeds its actors (utils.actor_seeds), so its games differ from this one.
 

@@ -294,7 +294,9 @@ MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # later: predictor-data
 MENTIONS_ORACLE_LABELS = {'douzero/dmc/oracle.py',               # defines it
                           'douzero/dmc/utils.py',                # act(), for the oracle arm only
                           'douzero/evaluation/oracle_agent.py',  # OracleAgent
-                          'trace_episode.py'}                    # debug trace of one game
+                          'trace_episode.py',                    # debug trace of one game
+                          'douzero/viz/record.py'}               # replay/comparison: oracle arm and teaching reveal;
+                                                                 # never imported by training (tests/test_viz.py)
 
 
 def _files_mentioning(name):
