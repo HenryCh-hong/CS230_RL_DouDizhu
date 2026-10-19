@@ -6,14 +6,15 @@ from douzero.env.env import get_obs
 def _load_model(position, model_path):
     from douzero.dmc.models import model_dict
     model = model_dict[position]()
-    model_state_dict = model.state_dict()
     if torch.cuda.is_available():
         pretrained = torch.load(model_path, map_location='cuda:0')
     else:
         pretrained = torch.load(model_path, map_location='cpu')
-    pretrained = {k: v for k, v in pretrained.items() if k in model_state_dict}
-    model_state_dict.update(pretrained)
-    model.load_state_dict(model_state_dict)
+    # Strict: a run checkpoint, or a file missing any weight, used to load as a random network.
+    if not isinstance(pretrained, dict) or 'model_state_dict' in pretrained or 'cs230' in pretrained:
+        raise ValueError('{} is not a DouZero weights file; load run checkpoints with '
+                         'BeliefDeepAgent or OracleAgent'.format(model_path))
+    model.load_state_dict(pretrained)
     if torch.cuda.is_available():
         model.cuda()
     model.eval()

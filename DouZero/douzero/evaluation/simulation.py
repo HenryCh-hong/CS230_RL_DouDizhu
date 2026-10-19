@@ -73,6 +73,10 @@ def evaluate(landlord, landlord_up, landlord_down, eval_data, num_workers):
 
     for p in processes:
         p.join()
+    failed = [p.exitcode for p in processes if p.exitcode != 0]
+    if failed:  # a failed worker never reports, so waiting for its result would hang
+        raise RuntimeError('{} evaluation worker(s) failed with exit codes {}; see their tracebacks above'.format(
+            len(failed), failed))
 
     for i in range(num_workers):
         result = q.get()

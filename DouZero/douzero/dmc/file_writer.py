@@ -33,8 +33,8 @@ def gather_metadata() -> Dict:
         git_sha = repo.commit().hexsha
         git_data = dict(
             commit=git_sha,
-            branch=repo.active_branch.name,
-            is_dirty=repo.is_dirty(),
+            branch=None if repo.head.is_detached else repo.active_branch.name,
+            is_dirty=repo.is_dirty(untracked_files=True),
             path=repo.git_dir,
         )
     except git.InvalidGitRepositoryError:
@@ -54,7 +54,8 @@ def gather_metadata() -> Dict:
         successful=False,
         git=git_data,
         slurm=slurm_data,
-        env=os.environ.copy(),
+        # Only these keys: the full environment can hold credentials.
+        env={k: os.environ[k] for k in ('CUDA_VISIBLE_DEVICES', 'OMP_NUM_THREADS') if k in os.environ},
     )
 
 

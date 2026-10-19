@@ -3,6 +3,9 @@ This file includes the torch models. We wrap the three
 models into one class for convenience.
 """
 
+import hashlib
+import os
+
 import numpy as np
 
 import torch
@@ -177,36 +180,127 @@ def warm_start_from_douzero(position, douzero_state_dict):
     model.load_state_dict(state_dict)
     return model
 
-def save_hand_predictor(predictor, path):
-    torch.save(dict(position=predictor.position, num_targets=predictor.num_targets,
-                    state_dict=predictor.state_dict()), path)
+POSITIONS = ('landlord', 'landlord_up', 'landlord_down')
 
-def load_hand_predictor(path, freeze=True):
-    """Loads a saved HandPredictor, frozen (eval mode, no gradients) unless freeze is False."""
-    checkpoint = torch.load(path, map_location='cpu')
+def file_sha256(path):
+    """Hex sha256 of a file; runs record it to pin the exact checkpoints they used."""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def save_hand_predictor(predictor, path, provenance=None):
+    """Saves a predictor with its seat, size and provenance; only provenance['trained'] marks it trained."""
+    torch.save(dict(position=predictor.position, num_targets=predictor.num_targets,
+                    state_dict=predictor.state_dict(), provenance=provenance or dict(trained=False)), path)
+
+def load_hand_predictor(path, freeze=True, position=None, num_targets=None, sha256=None, require_trained=False):
+    """Loads a saved HandPredictor, frozen (eval mode, no gradients) unless freeze is False.
+
+    Fails loudly if the file is missing, differs from the expected sha256, was saved for another
+    seat or size than expected, is not marked as trained when require_trained is set, or does not
+    match the network exactly.
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError('no predictor checkpoint at {}'.format(path))
+    if sha256 is not None and file_sha256(path) != sha256:
+        raise ValueError('{} is not the predictor file the run used (sha256 differs)'.format(path))
+    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+    for key, expected in (('position', position), ('num_targets', num_targets)):
+        if expected is not None and checkpoint[key] != expected:
+            raise ValueError('{} holds a predictor with {} {!r}, expected {!r}'.format(path, key, checkpoint[key], expected))
+    provenance = checkpoint.get('provenance') or {}
+    if require_trained and not provenance.get('trained'):
+        raise ValueError('{} is not marked as trained; pass --allow_untrained_predictors only for smoke runs'.format(path))
     predictor = HandPredictor(checkpoint['position'], checkpoint['num_targets'])
     predictor.load_state_dict(checkpoint['state_dict'])
+    predictor.provenance = provenance
     if freeze:
         predictor.eval()
         predictor.requires_grad_(False)
     return predictor
 
+def load_predictors(hand_model, predictor_dir, sha256=None, require_trained=True):
+    """The frozen predictors of one arm, {seat: HandPredictor or None}, each loaded strictly.
+
+    M1 and M2c take one-hand predictors and M2 two-hand ones, as <seat>.ckpt in predictor_dir;
+    the other arms take none and must not be given a directory. sha256 ({seat: hash}) pins the
+    exact files a run used.
+    """
+    if hand_model != 'baseline' and hand_model not in PREDICTOR_TARGETS:
+        raise ValueError('unknown hand_model {!r}'.format(hand_model))
+    num_targets = PREDICTOR_TARGETS.get(hand_model, 0)
+    if not num_targets:
+        if predictor_dir:
+            raise ValueError('{} uses no predictor, but a predictor directory was given'.format(hand_model))
+        return {position: None for position in POSITIONS}
+    if not predictor_dir:
+        raise ValueError('{} needs a predictor directory'.format(hand_model))
+    return {position: load_hand_predictor(os.path.join(predictor_dir, position + '.ckpt'), position=position,
+                                          num_targets=num_targets, sha256=None if sha256 is None else sha256[position],
+                                          require_trained=require_trained)
+            for position in POSITIONS}
+
+def predictor_record(predictor_dir, predictors):
+    """What a run records about its frozen predictors (None if it has none): files, sha256, K, provenance."""
+    if all(predictor is None for predictor in predictors.values()):
+        return None
+    files = {}
+    for position, predictor in predictors.items():
+        path = os.path.abspath(os.path.join(predictor_dir, position + '.ckpt'))
+        files[position] = dict(path=path, sha256=file_sha256(path), provenance=predictor.provenance)
+    return dict(dir=os.path.abspath(predictor_dir), num_targets=predictors['landlord'].num_targets, frozen=True,
+                files=files)
+
+def load_arm_checkpoint(path, predictor_dir=None, device='cpu', allow_untrained=False):
+    """The Q-networks and frozen predictors of a saved run, loaded strictly; the arm comes from its metadata.
+
+    path is a run's model.tar or one of its weights_<frames>.tar files. Fails loudly if the file is
+    missing or has no run metadata, if any Q-network state does not match its network exactly, or
+    if a predictor file is missing, differs from the one used in training (sha256), has the wrong
+    seat or K, or is not marked as trained (allow_untrained is for smoke runs). predictor_dir
+    overrides the recorded directory when a run has been copied to another machine.
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError('no checkpoint at {}'.format(path))
+    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+    metadata = checkpoint.get('cs230') if isinstance(checkpoint, dict) else None
+    if not metadata:
+        raise ValueError('{} has no run metadata; it is not a checkpoint of this study'.format(path))
+    q_networks = {}
+    for position in POSITIONS:
+        q_network = model_dict[position](belief_dim=metadata['belief_dim'])
+        q_network.load_state_dict(checkpoint['model_state_dict'][position])
+        q_networks[position] = q_network.to(device).eval()
+    record = metadata['predictor']
+    if record is None:
+        predictors = load_predictors(metadata['hand_model'], None)
+    else:
+        predictors = load_predictors(metadata['hand_model'], predictor_dir or record['dir'],
+                                     sha256={p: f['sha256'] for p, f in record['files'].items()},
+                                     require_trained=not allow_untrained)
+    predictors = {p: None if predictor is None else predictor.to(device) for p, predictor in predictors.items()}
+    return dict(hand_model=metadata['hand_model'], metadata=metadata, q_networks=q_networks, predictors=predictors)
+
 class Model:
     """
     The wrapper for the three models. We also wrap several
     interfaces such as share_memory, eval, etc.
+    belief_dim > 0 builds the belief-input networks of the hand-belief arms.
     """
-    def __init__(self, device=0):
+    def __init__(self, device=0, belief_dim=0):
         self.models = {}
+        self.belief_dim = belief_dim
         if not device == "cpu":
             device = 'cuda:' + str(device)
-        self.models['landlord'] = LandlordLstmModel().to(torch.device(device))
-        self.models['landlord_up'] = FarmerLstmModel().to(torch.device(device))
-        self.models['landlord_down'] = FarmerLstmModel().to(torch.device(device))
+        self.models['landlord'] = LandlordLstmModel(belief_dim).to(torch.device(device))
+        self.models['landlord_up'] = FarmerLstmModel(belief_dim).to(torch.device(device))
+        self.models['landlord_down'] = FarmerLstmModel(belief_dim).to(torch.device(device))
 
-    def forward(self, position, z, x, training=False, flags=None):
+    def forward(self, position, z, x, training=False, flags=None, belief=None):
         model = self.models[position]
-        return model.forward(z, x, training, flags)
+        return model.forward(z, x, return_value=training, flags=flags, belief=belief)
 
     def share_memory(self):
         self.models['landlord'].share_memory()

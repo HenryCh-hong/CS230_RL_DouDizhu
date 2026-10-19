@@ -22,6 +22,9 @@ PREDICTOR_TARGETS = {'none': 0,          # M0c
                      'learned_both': 2,  # M2
                      'oracle': 0}        # true hands, positive control only
 HAND_MODELS = tuple(PREDICTOR_TARGETS)
+# 'baseline' is the original DouZero network, without a belief input.
+ARM_NAMES = {'baseline': 'DouZero', 'none': 'M0c', 'next': 'M1', 'derived_both': 'M2c', 'learned_both': 'M2',
+             'oracle': 'Oracle'}
 
 
 def union_counts_from_obs(x_no_action):

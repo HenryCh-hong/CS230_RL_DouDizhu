@@ -14,10 +14,14 @@ import numpy as np
 import pytest
 import torch
 
-from douzero.dmc import belief, models
+from douzero.dmc import belief, inprocess, models, oracle, utils
+from douzero.dmc.arguments import parser
 from douzero.env import hand_belief as hb
-from douzero.env.env import _cards2array, get_obs
+from douzero.env.env import Env, _cards2array, get_obs
+from douzero.evaluation.belief_agent import BeliefDeepAgent
 from douzero.evaluation.deep_agent import DeepAgent
+from douzero.evaluation.oracle_agent import OracleAgent
+from helpers import saved_run
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEAT_ORDER = ('landlord', 'landlord_up', 'landlord_down')  # GameEnv.get_infoset builds the union in this order
@@ -142,30 +146,27 @@ def test_douzero_adp_values_and_actions_are_identical_after_a_hidden_hand_swap(a
 
 @pytest.fixture(scope='module')
 def belief_arms():
-    """Per seat, randomly initialized arms; M1 and M2c share one next-player predictor."""
+    """Per seat, randomly initialized arms with frozen predictors; M1 and M2c share one."""
     torch.manual_seed(0)
     arms = {}
     for position in SEAT_ORDER:
-        next_predictor = models.HandPredictor(position, 1)
+        next_predictor = models.HandPredictor(position, 1).eval().requires_grad_(False)
         predictors = {'none': None, 'next': next_predictor, 'derived_both': next_predictor,
-                      'learned_both': models.HandPredictor(position, 2), 'oracle': None}
+                      'learned_both': models.HandPredictor(position, 2).eval().requires_grad_(False), 'oracle': None}
         arms[position] = {hand_model: models.make_arm(position, hand_model, predictor)
                           for hand_model, predictor in predictors.items()}
     return arms
 
 
 def _arm_decision(arm, hand_model, infoset):
-    """Belief and Q-values of one arm at infoset, computed from the observation as an actor will."""
+    """Belief and Q-values of one arm at infoset, through the actor's own code (actor_belief, oracle_labels)."""
     q_network, predictor = arm
     obs = get_obs(infoset)
-    x_no_action = torch.from_numpy(obs['x_no_action']).float()[None]
-    probs = labels = None
+    x_no_action = torch.from_numpy(obs['x_no_action'])
+    labels = oracle.oracle_labels(infoset, infoset.player_position, x_no_action) if hand_model == 'oracle' else None
+    beliefs = utils.actor_belief(hand_model, predictor, infoset.player_position, x_no_action,
+                                 torch.from_numpy(obs['z']), labels)
     with torch.no_grad():
-        if predictor is not None:
-            probs = predictor(torch.from_numpy(obs['z']).float()[None], x_no_action)['probs']
-        if hand_model == 'oracle':
-            labels = torch.from_numpy(hb.hand_labels(infoset))[None]
-        beliefs = belief.build_belief(hand_model, x_no_action, probs=probs, labels=labels)
         values = q_network(torch.from_numpy(obs['z_batch']), torch.from_numpy(obs['x_batch']), return_value=True,
                            belief=beliefs.expand(len(obs['legal_actions']), -1))['values']
     return beliefs, values
@@ -188,16 +189,112 @@ def test_the_oracle_arm_sees_the_hidden_hand_swap(belief_arms, swaps):
         assert not torch.equal(swapped_beliefs, beliefs)
 
 
+# ---------------------------------------------------------------- T21: swap invariance of the wired actor and agents
+
+class SwapEnv(Env):
+    """Env that, at every decision where a swap exists, swaps the hidden hands and hands the actor the
+    swapped infoset and the observation built from it."""
+    swap = True
+
+    def __init__(self, objective):
+        super().__init__(objective)
+        self.rng, self.swapped = np.random.RandomState(0), 0
+
+    def _observe(self):
+        swapped = swap_hidden_cards(self.infoset, self.rng) if self.swap else None
+        if swapped is not None:
+            self.infoset, self.swapped = swapped, self.swapped + 1
+        return self._leak(get_obs(self.infoset))
+
+    def _leak(self, obs):
+        return obs
+
+    def reset(self):
+        super().reset()
+        return self._observe()
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)
+        return (obs if done else self._observe()), reward, done, info
+
+
+class LeakyEnv(SwapEnv):
+    """A deliberately broken observation: the own-hand features carry the next player's true hand."""
+    swap = False
+
+    def _leak(self, obs):
+        next_player, _ = hb.hidden_players(self.infoset.player_position)
+        leaked = _cards2array(self.infoset.all_handcards[next_player])
+        obs['x_no_action'] = np.concatenate([leaked, obs['x_no_action'][54:]])
+        obs['x_batch'] = obs['x_batch'].copy()
+        obs['x_batch'][:, :54] = leaked
+        return obs
+
+
+class LeakySwapEnv(LeakyEnv):
+    swap = True
+
+
+def _stored_games(hand_model, env_class, monkeypatch):
+    """Two games of the real act() for one arm, as flushed rows per seat, and the env it played in."""
+    flags = parser.parse_args(['--hand_model', hand_model, '--unroll_length', '4', '--num_buffers', '100',
+                               '--seed', '7', '--actor_device_cpu', '--training_device', 'cpu'])
+    torch.manual_seed(1)
+    model = models.Model('cpu', belief_dim=belief.BELIEF_DIM)  # random belief weights, so beliefs move Q
+    num_targets = belief.PREDICTOR_TARGETS[hand_model]
+    predictors = {p: models.HandPredictor(p, num_targets).eval().requires_grad_(False) if num_targets else None
+                  for p in SEAT_ORDER}
+    made = {}
+    monkeypatch.setattr(utils, 'create_env', lambda flags: made.setdefault('env', env_class(flags.objective)))
+    buffers, _, full_queue = inprocess.run_actor(flags, model, predictors, max_episodes=2)
+    return {p: inprocess.flushed_rows(buffers, full_queue, p) for p in SEAT_ORDER}, made['env']
+
+
+@pytest.mark.parametrize('hand_model', ['none', 'next', 'derived_both', 'learned_both', 'oracle'])
+def test_act_stores_the_same_games_when_every_infoset_is_swapped(hand_model, monkeypatch):
+    plain, _ = _stored_games(hand_model, Env, monkeypatch)
+    swapped, env = _stored_games(hand_model, SwapEnv, monkeypatch)
+    assert env.swapped > 50
+    identical = all(torch.equal(plain[p][key], swapped[p][key]) for p in SEAT_ORDER for key in plain[p])
+    assert identical == (hand_model != 'oracle')  # only the oracle arm sees the true hands
+
+
+def test_the_act_swap_test_catches_an_observation_that_leaks(monkeypatch):
+    plain, _ = _stored_games('next', LeakyEnv, monkeypatch)
+    swapped, env = _stored_games('next', LeakySwapEnv, monkeypatch)
+    assert env.swapped > 50
+    assert not all(torch.equal(plain[p][key], swapped[p][key]) for p in SEAT_ORDER for key in plain[p])
+
+
+def test_evaluation_agents_are_blind_to_the_swap_except_the_oracle(tmp_path, swaps):
+    agents = {}
+    for hand_model, agent_class in (('derived_both', BeliefDeepAgent), ('oracle', OracleAgent)):
+        path = saved_run(hand_model, tmp_path / hand_model)[0]
+        agents[hand_model] = {p: agent_class(p, path) for p in SEAT_ORDER}
+    for state, swapped in swaps[::20]:
+        position = state['infoset'].player_position
+        m2c, oracle_agent = agents['derived_both'][position], agents['oracle'][position]
+        assert torch.equal(m2c.values(swapped), m2c.values(state['infoset']))
+        assert m2c.act(swapped) == m2c.act(state['infoset'])
+        assert not torch.equal(oracle_agent.belief(swapped), oracle_agent.belief(state['infoset']))
+
+
 # ---------------------------------------------------------------- T6b: static audit of true-hand reads
 
 SOURCE_FILES = sorted(path.relative_to(REPO_ROOT).as_posix() for path in REPO_ROOT.rglob('*.py')
-                      if 'tests' not in path.relative_to(REPO_ROOT).parts)
+                      if path.relative_to(REPO_ROOT).parts[0] not in ('tests', 'artifacts', 'baselines'))
 
 # Adding a file to these sets is a reviewed decision: that file can see the true hidden hands.
 MENTIONS_ALL_HANDCARDS = {'douzero/env/game.py',         # the engine fills InfoSet.all_handcards
                           'douzero/env/hand_belief.py'}  # hand_labels(), the only reader
-MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # later: predictor-data generation, oracle agent
+MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # later: predictor-data generation
+                        'douzero/dmc/oracle.py',         # oracle_labels(), the oracle arm's one access point
                         'trace_decision.py'}             # debug trace: shows the labels, runs the oracle arm
+# Each caller of oracle_labels can hand true hands to the oracle arm, so each is a reviewed oracle path.
+MENTIONS_ORACLE_LABELS = {'douzero/dmc/oracle.py',               # defines it
+                          'douzero/dmc/utils.py',                # act(), for the oracle arm only
+                          'douzero/evaluation/oracle_agent.py',  # OracleAgent
+                          'trace_episode.py'}                    # debug trace of one game
 
 
 def _files_mentioning(name):
@@ -212,6 +309,16 @@ def test_only_the_engine_and_hand_belief_mention_the_true_hands():
 
 def test_only_allow_listed_modules_mention_hand_labels():
     assert _files_mentioning('hand_labels') == MENTIONS_HAND_LABELS
+
+
+def test_only_reviewed_oracle_paths_call_oracle_labels():
+    assert _files_mentioning('oracle_labels') == MENTIONS_ORACLE_LABELS
+
+
+def test_only_the_engine_and_count_decoders_touch_the_seat_ordered_union():
+    # other_hand_cards concatenates the hidden hands in seat order; only order-free counts of it may be used.
+    assert _files_mentioning('other_hand_cards') == {'douzero/env/env.py', 'douzero/env/game.py',
+                                                    'douzero/env/hand_belief.py'}
 
 
 def test_only_the_engine_touches_its_own_state():
