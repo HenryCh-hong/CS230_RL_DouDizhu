@@ -125,17 +125,19 @@ def fresh_seed():
 def git_info(path=REPO):
     """The code's git state: commit, branch (None when detached), and whether anything differs from the commit.
 
-    untracked maps every untracked, non-ignored file to its sha256, and code_sha256 hashes the
-    tracked diff together with those files, so a run from a dirty tree still pins its exact code.
-    dirty is None when the state cannot be read (no git, or not a repository).
+    Only the code folder (path, DouZero/) counts: the project repository also holds notes, docs and
+    the proposal, which do not change what is trained. untracked maps every untracked, non-ignored
+    file under path to its sha256, and code_sha256 hashes the tracked diff together with those files,
+    so a run from a dirty tree still pins its exact code. dirty is None when the state cannot be read
+    (no git, or not a repository).
     """
     def git(*args):
         return subprocess.run(['git', '-C', str(path)] + list(args), capture_output=True, text=True,
                               check=True).stdout
     try:
-        status = git('status', '--porcelain').splitlines()
+        status = git('status', '--porcelain', '--', '.').splitlines()
         branch = git('rev-parse', '--abbrev-ref', 'HEAD').strip()
-        diff = git('diff', 'HEAD')
+        diff = git('diff', 'HEAD', '--', '.')
         untracked = sorted(p for p in git('ls-files', '--others', '--exclude-standard', '-z').split('\0') if p)
         untracked_sha256 = {p: file_sha256(os.path.join(str(path), p)) for p in untracked}
         code = hashlib.sha256((diff + json.dumps(untracked_sha256, sort_keys=True)).encode()).hexdigest()

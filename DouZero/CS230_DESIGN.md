@@ -1,6 +1,6 @@
 # CS230 hand-belief study: design notes
 
-Local branch `cs230-hand-belief`, based on kwai/DouZero `718a5c9`. Nothing is pushed.
+`DouZero/` is part of the project repository (one local git repository at the project root; nothing is pushed). Its first commit imports kwai/DouZero `718a5c9` unmodified (Apache-2.0), so `git diff <import commit> -- DouZero` shows every change made for this study. `run_dir.git_info` records the git state of `DouZero/` only.
 
 ## Question
 
@@ -241,7 +241,7 @@ DouZero's `evaluation/deep_agent.py` `DeepAgent` now loads strictly. It refuses 
 
 ## Tests and compute
 
-- **Running the tests.** From `DouZero/`, run `../.venv/bin/python -m pytest tests -p no:cacheprovider -q -rs`. The unit suite has 187 tests. It runs in one process and takes about 17 s on an idle Mac. pytest is installed only in the project `.venv`.
+- **Running the tests.** From `DouZero/`, run `../.venv/bin/python -m pytest tests -p no:cacheprovider -q -rs`. The unit suite has 188 tests. It runs in one process and takes about 17 s on an idle Mac. pytest is installed only in the project `.venv`.
 - **Integration tests (opt-in).** `tests/test_integration.py` holds 8 end-to-end tests of `train()`. They start real processes, with one actor and two learner threads per seat, and take about 75 s in all:
   - a tiny run completes, resumes and refuses a changed flag;
   - SIGTERM, SIGHUP and SIGINT each still save a final checkpoint and summary, and leave no actor behind;
@@ -249,7 +249,7 @@ DouZero's `evaluation/deep_agent.py` `DeepAgent` now loads strictly. It refuses 
   - a refused start (a bad predictor directory, or a warm start that does not fit) leaves no run folder;
   - evaluation fails loudly when a worker dies.
 
-  They are collected by the default run above but skipped unless `CS230_INTEGRATION=1` is set. A default run therefore shows 187 passed and 8 skipped (`-rs` prints the reasons). To run them:
+  They are collected by the default run above but skipped unless `CS230_INTEGRATION=1` is set. A default run therefore shows 188 passed and 8 skipped (`-rs` prints the reasons). To run them:
 
   ```
   CS230_INTEGRATION=1 ../.venv/bin/python -m pytest tests/test_integration.py -p no:cacheprovider -q
@@ -271,7 +271,7 @@ DouZero's `evaluation/deep_agent.py` `DeepAgent` now loads strictly. It refuses 
 ## Making training visible
 
 Every stage should make the data flow, tensor shapes, losses and training behavior visible enough to follow.
-- **`docs/TRAINING_WALKTHROUGH.md`** (project root, outside this repo) walks through the pipeline in 22 steps. Each step names its file, function, tensor shapes, information class and gradient flow. It also has the arm comparison, the gradient-flow diagrams, and worked examples of the CE and Q-losses.
+- **`docs/TRAINING_WALKTHROUGH.md`** (project root) walks through the pipeline in 22 steps. Each step names its file, function, tensor shapes, information class and gradient flow. It also has the arm comparison, the gradient-flow diagrams, and worked examples of the CE and Q-losses.
 - **`trace_decision.py`** prints one decision for every arm: observation shapes, predictor outputs against card counting, belief layouts, Q over the legal actions, and the epsilon-greedy choice. It is single-process and takes about a second.
 - **`trace_episode.py`** (stage 3) prints one full game of one arm and writes it to `debug/episode_trace.txt`. **`trace_learner_update.py`** (stage 3) prints one real learner update.
 - **Run directories** (stage 3) log `metrics.csv` every 5 s, one line per start in `attempts.jsonl`, and `summary.md` at the end of every start.
@@ -301,5 +301,5 @@ These come from the stage-2 and stage-3 reviews and must be settled in the stage
 
 1. **Done (stage 1).** `hand_belief.py` pure functions and tests T1–T6b. No change to the Q-network, actor, learner, buffers or training loop.
 2. **Done (stage 2).** The model layer: `HandPredictor`, the common 150-d belief interface, all five arms, the function-preserving warm start, stop-gradient checks, checkpoint round trips, and tests T8–T12 with the T6a extension. The trace tool and the walkthrough were added too. The actor, learner, buffers and training loop are still unchanged.
-3. **Done (stage 3), committed locally; awaiting review before stage 4.** It covers the actor, buffer, learner, checkpoint and reload wiring for all arms; the run directory, with start-up validation, resume rules, `attempts.jsonl` and checkpoint consistency; clean shutdown on SIGTERM, SIGHUP and SIGINT; the watchdog; strict loading and fail-loud evaluation (`DeepAgent`, `simulation.evaluate`); the evaluation agents; `trace_episode.py` and `trace_learner_update.py`; tests T7 and T13–T21; 187 unit tests; and 8 opt-in integration tests, which run tiny `train()` runs end to end with the current code (completion, resume, three stop signals, a killed actor). The older smoke artifact `artifacts/runs/smoke_m2c_seed0` (1 actor, 320 frames) predates the review fixes: it has no `attempts.jsonl` and no `weights_<frames>.tar`.
+3. **Done (stage 3), committed locally; awaiting review before stage 4.** It covers the actor, buffer, learner, checkpoint and reload wiring for all arms; the run directory, with start-up validation, resume rules, `attempts.jsonl` and checkpoint consistency; clean shutdown on SIGTERM, SIGHUP and SIGINT; the watchdog; strict loading and fail-loud evaluation (`DeepAgent`, `simulation.evaluate`); the evaluation agents; `trace_episode.py` and `trace_learner_update.py`; tests T7 and T13–T21; 188 unit tests; and 8 opt-in integration tests, which run tiny `train()` runs end to end with the current code (completion, resume, three stop signals, a killed actor). The older smoke artifact `artifacts/runs/smoke_m2c_seed0` (1 actor, 320 frames) predates the review fixes: it has no `attempts.jsonl` and no `weights_<frames>.tar`.
 4. **Next (after stage 3 is approved).** Stage 4: offline predictor dataset and training, which needs remote compute. No real RL training or large evaluation has been run.

@@ -440,6 +440,23 @@ def test_git_provenance_pins_untracked_code_and_fails_closed(tmp_path):
         run_dir.check_git(unknown, allow_dirty=False)
 
 
+def test_git_provenance_covers_only_the_code_folder(tmp_path):
+    # DouZero/ lives inside the project repository, next to notes and docs that do not change what is trained.
+    repo = tmp_path / 'project'
+    (repo / 'code').mkdir(parents=True)
+    _git(repo, 'init', '-q')
+    (repo / 'code' / 'train.py').write_text('x = 1\n')
+    (repo / 'notes.md').write_text('notes\n')
+    _git(repo, 'add', '.')
+    _git(repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'init')
+    (repo / 'notes.md').write_text('more notes\n')
+    (repo / 'draft.md').write_text('draft\n')
+    clean = run_dir.git_info(repo / 'code')
+    assert clean['dirty'] is False and clean['untracked'] == {}
+    (repo / 'code' / 'train.py').write_text('x = 2\n')
+    assert run_dir.git_info(repo / 'code')['dirty'] is True
+
+
 def test_metrics_file_keeps_one_schema(tmp_path):
     run = run_dir.RunDir(tmp_path / 'run')
     run.log_metrics({'frames': 0, 'loss_landlord': 1.0})

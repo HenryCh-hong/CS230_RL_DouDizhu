@@ -1,6 +1,6 @@
 # Training walkthrough: from one deal to one gradient step
 
-This document follows the pipeline that trains DouZero and our hand-belief arms. It starts with one deal, goes through one decision, and ends with one learner update, a checkpoint and an evaluation. It is written for someone still learning reinforcement learning (RL). Every step names the real file, function and tensor shapes on branch `cs230-hand-belief`, as of Stage 3: the actor, buffers, learner, run folder, resume and shutdown are wired and tested, and the opt-in integration tests run a tiny `train()` end to end.
+This document follows the pipeline that trains DouZero and our hand-belief arms. It starts with one deal, goes through one decision, and ends with one learner update, a checkpoint and an evaluation. It is written for someone still learning reinforcement learning (RL). Every step names the real file, function and tensor shapes in `DouZero/` of the project repository, as of Stage 3: the actor, buffers, learner, run folder, resume and shutdown are wired and tested, and the opt-in integration tests run a tiny `train()` end to end.
 
 **How to read it.** All code paths are relative to `DouZero/` unless they start with `docs/` or `tools/`. Line numbers are approximate guides; the function names are exact. Each step carries tags:
 
@@ -371,7 +371,7 @@ Its positive controls show that shifting the beliefs, actions or targets by one 
 
 - **Code:** the `checkpoint()` closure inside `train()` calls `dmc.save_checkpoint` every `--save_interval` (30) minutes and once more at the end. It takes no frame count: the counters are read under the same locks as the weights.
 - **Consistent snapshot:** it holds the three seat locks and the stats lock while copying the weights, optimizer states and counters, so no update is half-applied. A checkpoint therefore satisfies frames = unroll_length × batch_size × (sum of updates) = sum of position_frames. The integration tests check this. Each save writes `model.tar` (to a temporary file, then renamed into place, so a crash cannot corrupt the previous one) and `weights_<frames>.tar` beside it.
-- **Git provenance.** `run_dir.git_info` records the commit, the branch (None when detached), whether the tree is dirty, every untracked non-ignored file with its sha256, `diff_sha256` (the tracked diff) and `code_sha256` (the tracked diff plus the untracked hashes). `code_sha256` therefore pins the exact code a run used, even from a dirty tree. `run_dir.check_git` refuses a dirty tree, and an unreadable git state, unless `--allow_dirty` is given. The git record is stored in `config.json` and in every line of `attempts.jsonl`.
+- **Git provenance.** `run_dir.git_info` records the state of the code folder `DouZero/` only (notes and docs elsewhere in the repository do not count): the commit, the branch (None when detached), whether the code is dirty, every untracked non-ignored file with its sha256, `diff_sha256` (the tracked diff) and `code_sha256` (the tracked diff plus the untracked hashes). `code_sha256` therefore pins the exact code a run used, even from a dirty tree. `run_dir.check_git` refuses a dirty tree, and an unreadable git state, unless `--allow_dirty` is given. The git record is stored in `config.json` and in every line of `attempts.jsonl`.
 - **The run folder `artifacts/runs/<xpid>/`:**
 
 | File | Contents |
@@ -619,7 +619,7 @@ K is 1 for M1/M2c and 2 for M2. n is the number of scored (decision, action) row
 ## How we will know it is working
 
 - **Logged now, in every run's `metrics.csv`** (not `logs.csv`): per seat, the update count, loss, Q mean, Q std, grad norm, clipped and mean episode return; plus frames, fps and wall time. `summary.md` writes up the run.
-- **Are the tests passing?** The unit suite (187 tests at Stage 3, one process): `../.venv/bin/python -m pytest tests -p no:cacheprovider -q`. The integration file is collected too, but its 8 tests are skipped by default, so the output reads `187 passed, 8 skipped`. The opt-in end-to-end suite runs real `train()` processes, about 75 s: `CS230_INTEGRATION=1 ../.venv/bin/python -m pytest tests/test_integration.py -p no:cacheprovider -q`. Its 8 tests check that:
+- **Are the tests passing?** The unit suite (188 tests at Stage 3, one process): `../.venv/bin/python -m pytest tests -p no:cacheprovider -q`. The integration file is collected too, but its 8 tests are skipped by default, so the output reads `188 passed, 8 skipped`. The opt-in end-to-end suite runs real `train()` processes, about 75 s: `CS230_INTEGRATION=1 ../.venv/bin/python -m pytest tests/test_integration.py -p no:cacheprovider -q`. Its 8 tests check that:
   - a tiny run completes, writes its checkpoints and summary, resumes, and refuses a changed flag (`--learning_rate`) before recording the attempt;
   - SIGTERM, SIGHUP and SIGINT each still save a final checkpoint and summary, and leave no actor process behind;
   - a killed actor fails the run loudly (exit code 1, `RuntimeError` in the summary) and still saves;
