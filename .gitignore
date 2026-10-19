@@ -1,0 +1,17 @@
+# Python environment and caches
+.venv/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Third-party material kept on this machine only (size, copyright)
+reference_code/
+papers/
+papers_text/
+*.pdf
+proposal_template/
+
+# DouZero's original git history (kwai/DouZero plus the local stage branch), kept as a local backup
+.douzero_upstream.git/

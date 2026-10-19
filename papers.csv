@@ -1,0 +1,10 @@
+priority,filename,title,year,pdf_url
+A,01_DouZero_ICML2021.pdf,"DouZero: Mastering DouDizhu with Self-Play Deep Reinforcement Learning",2021,https://arxiv.org/pdf/2106.06135.pdf
+A,02_DouZeroPlus_2022.pdf,"DouZero+: Improving DouDizhu AI by Opponent Modeling and Coach-guided Learning",2022,https://arxiv.org/pdf/2204.02558.pdf
+A,03_Combinatorial_Q_Learning_DouDiZhu.pdf,"Combinatorial Q-Learning for Dou Di Zhu",2020,https://arxiv.org/pdf/1901.08925.pdf
+A,04_DeltaDou_IJCAI2019.pdf,"DeltaDou: Expert-level Doudizhu AI through Self-play",2019,https://www.ijcai.org/proceedings/2019/0176.pdf
+B,05_NFSP_2016.pdf,"Deep Reinforcement Learning from Self-Play in Imperfect-Information Games",2016,https://arxiv.org/pdf/1603.01121.pdf
+B,06_Deep_CFR_ICML2019.pdf,"Deep Counterfactual Regret Minimization",2019,https://proceedings.mlr.press/v97/brown19b/brown19b.pdf
+C,07_RLCard_IJCAI2020.pdf,"RLCard: A Platform for Reinforcement Learning in Card Games",2020,https://arxiv.org/pdf/1910.04376.pdf
+C,08_Suphx_Mahjong_2020.pdf,"Suphx: Mastering Mahjong with Deep Reinforcement Learning",2020,https://arxiv.org/pdf/2003.13590.pdf
+C,09_ReBeL_NeurIPS2020.pdf,"Combining Deep Reinforcement Learning and Search for Imperfect-Information Games",2020,https://arxiv.org/pdf/2007.13544.pdf

@@ -1,0 +1,85 @@
+\documentclass{article}
+
+% CS230 project proposal, built on the official NeurIPS 2026 style file.
+\PassOptionsToPackage{numbers,compress}{natbib}
+\usepackage[final]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\newcommand{\pagelimit}{2}
+
+\title{Does Explicitly Representing Both Hidden Hands Help\\Deep Monte Carlo Agents in Dou Dizhu? \\[0.4em]
+  \large (Reinforcement Learning)}
+
+\author{%
+  Honglong Chen \\
+  \texttt{henrych@stanford.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem Description}
+DouDizhu is a three-player imperfect-information card game: a Landlord plays two cooperating Peasants.
+DouZero~\cite{zha2021douzero} learns it by self-play Deep Monte Carlo (DMC); DouZero+~\cite{zhao2022douzeroplus,zhao2024fulldouzeroplus} adds a learned prediction of the \emph{next} player's hidden hand.
+The input to my algorithm is observable state $o_t$ and a legal action $a_t$; I then use a hidden-hand predictor and a per-seat Q-network to output that action's expected final reward.
+But the state reveals the union of both hidden hands and their sizes, so knowing one determines the other (card conservation).
+I ask whether explicitly representing both hidden hands nevertheless helps a DMC agent play better than representing only the next player's.
+
+\section{Challenges}
+The main challenge is measurement: since the second hand adds no information or supervision, any effect will be small against deal and seed noise, and even DouZero+'s gain is contested~\cite{lei2024alphadou} (an independent re-training at smaller compute found DouZero+ below DouZero~\cite{luo2024oadmcdou}).
+Paired evaluation and controls address this.
+
+\section{Dataset}
+Data come from the DouZero simulator (Apache-2.0)~\cite{douzerocode}; true hands are only labels and oracle inputs.
+Predictors are pretrained on about $10^6$ DouZero-ADP self-play decisions, then fine-tuned jointly.
+Validation (2{,}000 deals, for pilots) and test (10{,}000) sets are held out.
+
+\section{Preprocessing}
+The studied variable is a belief: for hidden player $j$ and each of the 15 card kinds $r$ (13 ranks, 2 jokers), a distribution over $j$'s count $c_j(r)\in\{0,\dots,u_t(r)\}$, with $u_t(r)$ the unseen cards of kind $r$.
+
+\section{Learning Method}
+I extend DouZero's released code: a per-seat predictor $p_\phi$ maps $o_t$ to beliefs $\hat b_t$ about $K\in\{1,2\}$ hidden hands, fed to the Q-network via a stop-gradient:
+\[
+\mathcal{L}_{\mathrm{DMC}}(\theta)=\mathbb{E}\big[(Q_\theta(o_t,a_t,\mathrm{sg}[\hat b_t])-G)^2\big],\qquad
+\mathcal{L}_{\mathrm{pred}}(\phi)=-\frac{1}{15K}\sum_{j=1}^{K}\sum_{r=1}^{15}\log p_\phi\big(c_j(r)=c^{*}_j(r)\mid o_t\big),
+\]
+with $c^{*}_j(r)$ the true count and $G=\pm2^{\#\mathrm{bombs}}$, the seat's final ADP reward.
+The arms differ only in $\hat b_t$:
+no beliefs (M0c, continued DouZero training);
+the next player's hand (M1, DouZero+'s predictor; $K{=}1$);
+both hands, learned (M2; $K{=}2$);
+M1 plus the conservation-derived second belief, $p(c_2(r){=}k)=p(c_1(r){=}u_t(r)-k)$ (M2c; same input width as M2, no second predictor);
+and the true hands (oracle; a positive control).
+All arms start from DouZero-ADP's released weights, with new input weights zero-initialized (one shared starting policy), and train about $2\times10^8$ decisions each (15 runs, an estimated five hours each on 16 AWS vCPUs; piloted first).
+This is a controlled comparison; prior work inferred hidden hands inside search~\cite{jiang2019deltadou} or used true hands only in training~\cite{luo2024oadmcdou,yang2022perfectdou}.
+
+\section{Evaluation}
+Each test deal is played twice, swapping who plays Landlord.
+The primary metric is Average Difference in Points (ADP), overall and per role.
+The pre-specified primary quantity is $\Delta$, M2c's overall head-to-head ADP against M1 at the final budget, isolating explicit presentation with information fixed.
+I approximately reproduced DouZero-ADP's published result (ADP 2.34, 95\% CI 2.30--2.38, vs.\ the RLCard rule agent~\cite{zha2019rlcard}; paper: 2.29).
+I report learning curves, per-seed 95\% paired-deal CIs, three-seed spread, predictor cross-entropy against hypergeometric card counting, and sampled decisions where M2c and M1 differ.
+If the oracle beats M0c by over 0.05 ADP, $\Delta>0.05$ in every seed means explicit presentation helps, $\Delta<-0.05$ in every seed that it hurts, and every per-seed CI within $\pm0.05$ that it is unnecessary; anything else is inconclusive. Otherwise, the comparison is uninformative.
+
+\section*{References}
+
+\renewcommand{\bibsection}{}
+\medskip
+{\small
+\bibliographystyle{plainnat}
+\bibliography{references}
+}
+
+\end{document}
