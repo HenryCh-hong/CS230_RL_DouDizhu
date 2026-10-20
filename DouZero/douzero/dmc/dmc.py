@@ -1,5 +1,7 @@
 import contextlib
 import copy
+import hashlib
+import io
 import math
 import os
 import signal
@@ -121,6 +123,15 @@ def check_flags(flags):
         raise ValueError('--predictor_dir is required by next, derived_both and learned_both, and only by them')
     if flags.load_model and flags.warm_start_dir:
         raise ValueError('--load_model resumes a run and --warm_start_dir starts a new one; give only one')
+    if flags.fork_from_checkpoint:
+        if not (flags.fork_reason or '').strip():
+            raise ValueError('--fork_from_checkpoint needs a --fork_reason saying why the fork is made')
+        if flags.load_model or flags.warm_start_dir:
+            raise ValueError('--fork_from_checkpoint starts a new run; give it without --load_model and --warm_start_dir')
+    elif flags.fork_reason is not None:
+        raise ValueError('--fork_reason is only for --fork_from_checkpoint')
+    if flags.unsafe_resume_across_code_change and not flags.load_model:
+        raise ValueError('--unsafe_resume_across_code_change only applies to --load_model')
     if flags.num_buffers < flags.batch_size:
         raise ValueError('--num_buffers must be at least --batch_size, or a learner can never fill a batch')
 
@@ -139,7 +150,9 @@ def run_metadata(flags, predictors):
     return dict(arm=ARM_NAMES[flags.hand_model], hand_model=flags.hand_model,
                 belief_dim=0 if flags.hand_model == 'baseline' else BELIEF_DIM, seed=flags.seed,
                 predictor=predictor_record(flags.predictor_dir, predictors),
-                warm_start=warm_start_record(flags.warm_start_dir), git=run_dir.git_info())
+                warm_start=warm_start_record(flags.warm_start_dir), git=run_dir.git_info(),
+                run=dict(xpid=flags.xpid, run_dir=os.path.abspath(os.path.join(flags.savedir, flags.xpid))),
+                fork=None, invalid_for_final_results=False)
 
 def warm_start_states(flags, belief_dim):
     """{seat: state_dict} the learner starts from with --warm_start_dir, or None."""
@@ -155,10 +168,10 @@ def warm_start_states(flags, belief_dim):
 def initial_models(flags, device_iterator, checkpoint_states=None):
     """Actor models (one Model per device), the learner Model and its optimizers, all with the same weights.
 
-    The learner starts from the checkpoint being resumed, else from --warm_start_dir, else from its
-    random initialization. Every actor copy then gets exactly the learner's weights. DouZero copied
+    The learner starts from the checkpoint being resumed or forked, else from --warm_start_dir, else from
+    its random initialization. Every actor copy then gets exactly the learner's weights. DouZero copied
     them only when resuming, so warm-started actors would have played with random networks until
-    the first learner update.
+    the first learner update. A checkpoint without optimizer state (a weights file) starts fresh optimizers.
     """
     belief_dim = 0 if flags.hand_model == 'baseline' else BELIEF_DIM
     learner_model = Model(device=flags.training_device, belief_dim=belief_dim)
@@ -166,7 +179,10 @@ def initial_models(flags, device_iterator, checkpoint_states=None):
     if checkpoint_states is not None:
         for k in POSITIONS:
             learner_model.get_model(k).load_state_dict(checkpoint_states['model_state_dict'][k])
-            optimizers[k].load_state_dict(checkpoint_states['optimizer_state_dict'][k])
+            if 'optimizer_state_dict' in checkpoint_states:
+                optimizers[k].load_state_dict(checkpoint_states['optimizer_state_dict'][k])
+                for group in optimizers[k].param_groups:  # this run's settings, not the parent's (equal on a resume)
+                    group.update(lr=flags.learning_rate, momentum=flags.momentum, eps=flags.epsilon, alpha=flags.alpha)
     else:
         start = warm_start_states(flags, belief_dim)
         if start is not None:
@@ -226,30 +242,87 @@ def save_weights(path, snapshot, metadata):
     """Writes every seat's weights at one point with the run metadata, so load_arm_checkpoint can rebuild that arm."""
     _atomic_save(dict(model_state_dict=snapshot['model_state_dict'], frames=snapshot['frames'], cs230=metadata), path)
 
-def read_checkpoint(path):
+def read_checkpoint(path, flag='--load_model'):
     if not os.path.isfile(path):
-        raise FileNotFoundError('--load_model: no checkpoint at {}'.format(path))
+        raise FileNotFoundError('{}: no checkpoint at {}'.format(flag, path))
     return torch.load(path, map_location='cpu', weights_only=True)
 
 def _predictor_hashes(record):
     return None if record is None else (record['num_targets'], {p: f['sha256'] for p, f in record['files'].items()})
 
 def check_resume(states, metadata, flags, path):
-    """Refuses to resume a run as a different experiment.
+    """Refuses to resume a run as a different experiment; returns True when a code change was overridden.
 
-    The arm, the predictor files (compared by sha256, so a copied run still resumes) and every flag
-    in RESUME_FIXED_FLAGS must match the saved run.
+    The arm, the predictor files (compared by sha256, so a copied run still resumes), every flag in
+    RESUME_FIXED_FLAGS and the code must match the saved run. The code matches when its git commit and
+    code_sha256 (the tracked diff and the untracked files) are equal and both git states are known. A
+    different code version is a different experiment, so it is refused unless --unsafe_resume_across_code_change
+    (debugging only) lets it through; the caller then marks the run invalid for final results.
     """
     saved = states.get('cs230')
     if saved is None:
         raise ValueError('{} has no run metadata, so it cannot be resumed as this run'.format(path))
+    hint = 'a different code version is a different experiment: fork it instead, with ' + _fork_hint(path)
     differences = [key for key in ('hand_model', 'belief_dim') if saved[key] != metadata[key]]
     if _predictor_hashes(saved['predictor']) != _predictor_hashes(metadata['predictor']):
         differences.append('predictor files')
     saved_flags = states.get('flags', {})
     differences += [key for key in RESUME_FIXED_FLAGS if saved_flags.get(key) != getattr(flags, key, None)]
     if differences:
-        raise ValueError('cannot resume {}: {} differ from the saved run'.format(path, ', '.join(differences)))
+        raise ValueError('cannot resume {}: {} differ from the saved run. {}'.format(
+            path, ', '.join(differences), hint))
+    for which, git in (('saved', saved['git']), ('current', metadata['git'])):
+        if git['commit'] is None or git['dirty'] is None or git['code_sha256'] is None:
+            raise ValueError('cannot resume {}: the git state of the {} code is unknown (commit {}, dirty {}), so it '
+                             'cannot be shown to match the saved run. {}'.format(path, which, git['commit'],
+                                                                                 git['dirty'], hint))
+    code = [key for key in ('commit', 'code_sha256') if saved['git'][key] != metadata['git'][key]]
+    if not code:
+        return False
+    if not flags.unsafe_resume_across_code_change:
+        raise ValueError('cannot resume {}: the code differs from the saved run in {} (saved commit {}, sha256 {}; '
+                         'now commit {}, sha256 {}). {}. For debugging only, '
+                         '--unsafe_resume_across_code_change resumes anyway and marks the run invalid for final '
+                         'results'.format(path, ', '.join(code), saved['git']['commit'], saved['git']['code_sha256'],
+                                          metadata['git']['commit'], metadata['git']['code_sha256'], hint))
+    return True
+
+def _fork_hint(path):
+    return '--fork_from_checkpoint {} --fork_reason TEXT and a new --xpid'.format(path)
+
+def read_fork_parent(path, metadata, flags):
+    """The parent checkpoint of a fork, and the fork record that config.json and every later checkpoint carry.
+
+    path is a run's checkpoints/model.tar or weights_<frames>.tar. The parent must be a checkpoint of this study
+    with the same network shape (belief_dim); its arm may differ, and the record names it. Its optimizer state
+    is restored only when the file holds one. Returns (parent states, fork record).
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError('--fork_from_checkpoint: no checkpoint at {}'.format(path))
+    with open(path, 'rb') as f:  # hash and load the same bytes, even if the parent saves again meanwhile
+        raw = f.read()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    states = torch.load(io.BytesIO(raw), map_location='cpu', weights_only=True)
+    saved = states.get('cs230')
+    if saved is None:
+        raise ValueError('{} has no run metadata; it is not a checkpoint of this study, so it cannot be forked'.format(path))
+    if saved['belief_dim'] != metadata['belief_dim']:
+        raise ValueError('cannot fork {}: its network has belief_dim {} but this run has {}'.format(
+            path, saved['belief_dim'], metadata['belief_dim']))
+    checkpoint = os.path.realpath(path)
+    if saved.get('run'):  # the run the file itself says it belongs to, wherever the file now is
+        parent_run_id = dict(xpid=saved['run']['xpid'], run_dir=saved['run']['run_dir'])
+    else:  # a checkpoint saved before runs recorded their identity: inferred from <run>/checkpoints/<file>
+        run_path = os.path.dirname(os.path.dirname(checkpoint))
+        parent_run_id = dict(xpid=os.path.basename(run_path), run_dir=run_path, inferred_from_path=True)
+    record = dict(parent_run_id=parent_run_id, parent_checkpoint=dict(path=checkpoint, sha256=sha256),
+                  parent_frames=states['frames'], parent_hand_model=saved['hand_model'],
+                  parent_code=dict(commit=saved['git']['commit'], code_sha256=saved['git']['code_sha256']),
+                  current_code=dict(commit=metadata['git']['commit'], code_sha256=metadata['git']['code_sha256']),
+                  reason=flags.fork_reason.strip(), optimizer_state_restored='optimizer_state_dict' in states,
+                  parent_fork=saved.get('fork'), parent_warm_start=saved.get('warm_start'),
+                  actor_lineage=int(sha256[:8], 16) | 1)  # nonzero: the fork's actors get streams of their own
+    return states, record
 
 def load_checkpoint_states(path, metadata, flags):
     """The saved state of a run to resume, after check_resume has confirmed it is the same experiment."""
@@ -363,9 +436,28 @@ def train(flags):
                                  require_trained=not flags.allow_untrained_predictors)
     metadata = run_metadata(flags, predictors)
     run_dir.check_git(metadata['git'], flags.allow_dirty)
+    fork_states = None
     if checkpoint_states is not None:
-        check_resume(checkpoint_states, metadata, flags, checkpointpath)
+        code_overridden = check_resume(checkpoint_states, metadata, flags, checkpointpath)
         metadata['warm_start'] = checkpoint_states['cs230']['warm_start']  # where the run originally started
+        metadata['fork'] = checkpoint_states['cs230'].get('fork')  # the parent it was forked from, if any
+        flags.lineage = (metadata['fork'] or {}).get('actor_lineage', 0)  # a resumed fork keeps its own streams
+        metadata['invalid_for_final_results'] = (  # sticky: a run marked invalid stays invalid
+            checkpoint_states['cs230'].get('invalid_for_final_results', False) or code_overridden)
+        if code_overridden:
+            log.warning('--unsafe_resume_across_code_change: resuming %s across a code change; the run is invalid '
+                        'for final results', run_path)
+    elif flags.fork_from_checkpoint:
+        fork_states, metadata['fork'] = read_fork_parent(flags.fork_from_checkpoint, metadata, flags)
+        new = os.path.realpath(run_path)
+        for parent in {os.path.realpath(metadata['fork']['parent_run_id']['run_dir']),
+                       os.path.dirname(os.path.dirname(metadata['fork']['parent_checkpoint']['path']))}:
+            if new == parent or new.startswith(parent + os.sep):
+                raise ValueError('a fork must not be created inside its parent run folder {}; choose another '
+                                 '--savedir'.format(parent))
+        metadata['warm_start'] = metadata['fork']['parent_warm_start']  # where the lineage started
+        flags.lineage = metadata['fork']['actor_lineage']
+        metadata['invalid_for_final_results'] = fork_states['cs230'].get('invalid_for_final_results', False)
 
     T = flags.unroll_length
     B = flags.batch_size
@@ -377,7 +469,8 @@ def train(flags):
         assert flags.num_actor_devices <= len(flags.gpu_devices.split(',')), 'The number of actor devices can not exceed the number of available devices'
 
     # Initialize the learner and actor models, with identical weights, and the actors' frozen predictors
-    models, learner_model, optimizers = initial_models(flags, device_iterator, checkpoint_states)
+    start_states = checkpoint_states if checkpoint_states is not None else fork_states  # the learner's first weights
+    models, learner_model, optimizers = initial_models(flags, device_iterator, start_states)
     actor_predictors = {device: frozen_copies(predictors, device) for device in device_iterator}
 
     # Initialize buffers
@@ -395,7 +488,7 @@ def train(flags):
         run.truncate_metrics(checkpoint_states['frames'])  # rows after the checkpoint describe lost progress
     run.record_attempt(dict(started=run_dir.now(), attempt=flags.attempt, seed=flags.seed, git=metadata['git'],
                             resumed_from_frames=None if checkpoint_states is None else checkpoint_states['frames'],
-                            flags=vars(flags)))
+                            invalid_for_final_results=metadata['invalid_for_final_results'], flags=vars(flags)))
     plogger = FileWriter(
         xpid=flags.xpid,
         xp_args=flags.__dict__,

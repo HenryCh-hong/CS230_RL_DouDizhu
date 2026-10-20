@@ -230,6 +230,11 @@ def test_actor_seeds_never_collide_across_nearby_runs_devices_actors_or_attempts
     assert utils.actor_seeds(3, 'cpu', 2) == utils.actor_seeds(3, 'cpu', 2)
 
 
+def test_a_fork_lineage_gives_its_actors_their_own_streams():
+    assert utils.actor_seeds(3, 'cpu', 0, 0, lineage=0) == utils.actor_seeds(3, 'cpu', 0, 0)  # plain runs unchanged
+    assert utils.actor_seeds(3, 'cpu', 0, 0, lineage=12345) != utils.actor_seeds(3, 'cpu', 0, 0)
+
+
 def test_a_resumed_attempt_gives_its_actors_fresh_random_streams():
     numpy_state, torch_state = np.random.get_state(), torch.get_rng_state()  # seed_actor sets the global RNGs
     try:

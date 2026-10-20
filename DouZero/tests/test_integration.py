@@ -32,12 +32,14 @@ ENV = dict(os.environ, OMP_NUM_THREADS='1', PYTHONDONTWRITEBYTECODE='1')
 FRAMES_PER_UPDATE = 8 * 2  # --unroll_length x --batch_size below
 
 
-def train_command(tmp_path, xpid, frames=200, *extra, resume=False, warm_start=ADP):
+def train_command(tmp_path, xpid, frames=200, *extra, resume=False, warm_start=ADP, fork=None):
     predictors = tmp_path / 'predictors'
     if not predictors.exists():
         save_predictors(predictors, 1, trained=False)
     # A resume restarts from the run's own checkpoint, so it takes --load_model instead of --warm_start_dir.
     start = ['--load_model'] if resume else ['--warm_start_dir', str(warm_start)]
+    if fork is not None:  # a fork starts a new folder from another run's checkpoint, with its own reason
+        start = ['--fork_from_checkpoint', str(fork), '--fork_reason', 'integration test']
     return ([sys.executable, str(REPO / 'train.py'), '--hand_model', 'derived_both', '--predictor_dir', str(predictors),
              '--allow_untrained_predictors'] + start +
             ['--actor_device_cpu', '--training_device', 'cpu', '--num_actors', '1', '--num_threads', '2',
@@ -142,6 +144,31 @@ def test_a_tiny_run_completes_resumes_and_refuses_a_changed_flag(tmp_path):
     refused = run(train_command(tmp_path, 'm2c', 600, '--learning_rate', '0.001', resume=True))
     assert refused.returncode != 0 and 'learning_rate' in refused.stderr
     assert len((run_path / 'attempts.jsonl').read_text().splitlines()) == 2  # refused before anything was recorded
+
+
+def tree(path):
+    """Every file (with its sha256) and folder under path, to check that a run folder is exactly unchanged."""
+    return {str(p.relative_to(path)): models.file_sha256(p) if p.is_file() else 'folder'
+            for p in sorted(Path(path).rglob('*'))}
+
+
+def test_a_fork_starts_from_a_parent_checkpoint_and_never_writes_into_it(tmp_path):
+    first = run(train_command(tmp_path, 'parent'))
+    assert first.returncode == 0, first.stderr[-2000:]
+    parent_dir = tmp_path / 'runs' / 'parent'
+    before, parent_frames = tree(parent_dir), checked_checkpoint(parent_dir)['frames']
+    forked = run(train_command(tmp_path, 'child', fork=parent_dir / 'checkpoints' / 'model.tar'))
+    assert forked.returncode == 0, forked.stderr[-2000:]
+    assert tree(parent_dir) == before  # nothing in the parent folder was written, read back or touched
+    child = tmp_path / 'runs' / 'child'
+    fork = json.loads((child / 'config.json').read_text())['metadata']['fork']
+    assert fork['parent_run_id']['xpid'] == 'parent' and fork['parent_frames'] == parent_frames
+    assert fork['optimizer_state_restored'] is True and fork['reason'] == 'integration test'
+    assert '**Forked from:**' in (child / 'summary.md').read_text()
+    child_states = checked_checkpoint(child)
+    assert sum(child_states['updates'].values()) > 0  # the fork trained: its own counter ran from 0, not from the parent
+    attempts = [json.loads(line) for line in (child / 'attempts.jsonl').read_text().splitlines()]
+    assert attempts[0]['resumed_from_frames'] is None
 
 
 @pytest.mark.parametrize('signum, status', [(signal.SIGTERM, 'terminated (SIGTERM)'),

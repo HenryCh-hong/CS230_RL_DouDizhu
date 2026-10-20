@@ -122,21 +122,26 @@ def create_buffers(flags, device_iterator, share_memory=True):
             buffers[device][position] = _buffers
     return buffers
 
-def actor_seeds(seed, device, i, attempt=0):
+def actor_seeds(seed, device, i, attempt=0, lineage=0):
     """(numpy seed, torch seed) of actor i on device in a run with --seed seed (attempt counts resumes).
+
+    lineage is 0 for a run started from scratch or a warm start; a fork gets a lineage from its parent
+    checkpoint, so its actors never replay the parent's streams, even with the same --seed.
 
     Derived with numpy's SeedSequence from all four numbers, so consecutive run seeds no longer
     share streams the way --seed + i did. np.random.seed takes 32 bits, so two combinations collide
     with probability about 2^-32 per pair: negligible for the few hundred actor streams of this study.
     """
     device_index = 0 if device == 'cpu' else int(device) + 1
-    numpy_seed, torch_seed = np.random.SeedSequence([seed, device_index, i, attempt]).generate_state(2)
+    entropy = [seed, device_index, i, attempt] + ([lineage] if lineage else [])  # plain runs keep their streams
+    numpy_seed, torch_seed = np.random.SeedSequence(entropy).generate_state(2)
     return int(numpy_seed), int(torch_seed)
 
 def seed_actor(flags, device, i):
     """Seeds actor i's stream of deals and exploration from --seed (see actor_seeds)."""
     if getattr(flags, 'seed', None) is not None:
-        numpy_seed, torch_seed = actor_seeds(flags.seed, device, i, getattr(flags, 'attempt', 0))
+        numpy_seed, torch_seed = actor_seeds(flags.seed, device, i, getattr(flags, 'attempt', 0),
+                                             getattr(flags, 'lineage', 0))
         np.random.seed(numpy_seed)
         torch.manual_seed(torch_seed)
 

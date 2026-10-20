@@ -73,3 +73,11 @@ parser.add_argument('--seed', default=None, type=int,
                     help='Seeds initialization, deals and exploration; drawn at random and recorded when omitted')
 parser.add_argument('--allow_dirty', action='store_true',
                     help='Allow training from a git tree with uncommitted changes (recorded in config.json)')
+parser.add_argument('--fork_from_checkpoint', default=None,
+                    help='Start a new run (new --xpid) from a run checkpoint (model.tar or weights_<frames>.tar): its '
+                         'weights, and its optimizer state when the file has one. Needs --fork_reason')
+parser.add_argument('--fork_reason', default=None,
+                    help='Why the fork is made; recorded in config.json and summary.md (required with --fork_from_checkpoint)')
+parser.add_argument('--unsafe_resume_across_code_change', action='store_true',
+                    help='DEBUGGING ONLY: let --load_model resume a run whose code differs from the saved one. The run '
+                         'is then marked invalid for final results')

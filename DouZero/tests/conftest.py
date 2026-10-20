@@ -14,6 +14,18 @@ from douzero.env.env import Env
 torch.set_num_threads(1)  # local tests stay single-threaded
 
 
+@pytest.fixture(autouse=True)
+def no_training_processes(monkeypatch):
+    """Unit tests may call train() only to see it refuse to start: one that got past its checks would spawn
+    --num_actors actor processes (5 by default) and train for ever. This makes that fail at once instead.
+    The opt-in tests/test_integration.py starts train.py as subprocesses, which this does not affect."""
+    from douzero.dmc import dmc
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError('a unit test tried to start training processes; only tests/test_integration.py may')
+    monkeypatch.setattr(dmc.mp, 'get_context', refuse)
+
+
 def play_random_games(num_games, seed):
     """Seeded random self-play. Returns one record per decision state, in play order.
 

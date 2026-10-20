@@ -180,7 +180,14 @@ def summary_markdown(config, attempts, status, elapsed, frames, updates, stats, 
     gits = [attempt['git'] for attempt in attempts if 'git' in attempt] or [meta['git']]  # every attempt's code
     start = meta['warm_start']
     predictor = meta['predictor']
+    fork = meta.get('fork')
     warnings = []
+    if meta.get('invalid_for_final_results') or any(attempt.get('invalid_for_final_results') for attempt in attempts):
+        warnings.append('INVALID FOR FINAL RESULTS: this run, or the run it was forked from, resumed across a code '
+                        'change (--unsafe_resume_across_code_change); do not report its results as final')
+    if fork and fork['parent_hand_model'] != meta['hand_model']:
+        warnings.append('forked from a `--hand_model {}` run; this run is `--hand_model {}`'.format(
+            fork['parent_hand_model'], meta['hand_model']))
     if status != 'completed':
         warnings.append('the run did not complete ({})'.format(status))
     if any(git['dirty'] is None for git in gits):
@@ -199,8 +206,20 @@ def summary_markdown(config, attempts, status, elapsed, frames, updates, stats, 
              '- **Seed:** {} (it seeds initialization and each actor\'s stream of deals and exploration; '
              'asynchronous actors and learners still make the learning trajectory vary)'.format(meta['seed']),
              '- **Attempts:** {} (first start plus resumes; see attempts.jsonl)'.format(len(attempts)),
-             '- **Starting checkpoint:** {}'.format(start['dir'] if start else 'random initialization'),
-             '- **Predictor:** {}'.format('none' if predictor is None else '{}, K={}, frozen'.format(
+             '- **Starting checkpoint:** {}'.format(
+                 'fork of {}'.format(fork['parent_checkpoint']['path']) if fork else
+                 start['dir'] if start else 'random initialization')]
+    if fork:
+        lines.append('- **Forked from:** run `{}` at `{}`, checkpoint `{}` (sha256 {}), {} frames; parent code commit {} '
+                     '(code sha256 {}); this run\'s code commit {} (code sha256 {}); arm of the parent `{}`; '
+                     'optimizer state {}; reason: {}'.format(
+                         fork['parent_run_id']['xpid'], fork['parent_run_id']['run_dir'],
+                         fork['parent_checkpoint']['path'], fork['parent_checkpoint']['sha256'],
+                         fork['parent_frames'], fork['parent_code']['commit'], fork['parent_code']['code_sha256'],
+                         fork['current_code']['commit'], fork['current_code']['code_sha256'],
+                         fork['parent_hand_model'], 'restored' if fork['optimizer_state_restored'] else 'not restored',
+                         fork['reason']))
+    lines += ['- **Predictor:** {}'.format('none' if predictor is None else '{}, K={}, frozen'.format(
                  predictor['dir'], predictor['num_targets'])),
              '- **Training:** {} frames; learner updates landlord / landlord_up / landlord_down = {} / {} / {}; '
              'training wall-clock {:.1f} s'.format(frames, updates['landlord'], updates['landlord_up'],

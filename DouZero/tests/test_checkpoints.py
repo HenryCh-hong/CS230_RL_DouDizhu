@@ -479,3 +479,239 @@ def test_run_metadata_holds_no_environment_variables(tmp_path, monkeypatch):
     assert 'do-not-record' not in json.dumps(meta)
     assert set(meta['env']) <= {'CUDA_VISIBLE_DEVICES', 'OMP_NUM_THREADS'}
     writer.close()
+
+
+# ---------------------------------------------------------------- code identity, unsafe override and forks
+
+def tree(path):
+    """Every file (with its sha256) and folder under path: to check that nothing in it changed, not even a new folder."""
+    return {str(p.relative_to(path)): models.file_sha256(p) if p.is_file() else 'folder'
+            for p in sorted(Path(path).rglob('*'))}
+
+
+def other_code(metadata, **changes):
+    """The run metadata as if the code had been different: changes replace fields of its git record."""
+    return dict(metadata, git=dict(metadata['git'], **changes))
+
+
+def parent_run(tmp_path, hand_model='next'):
+    """A saved run laid out as a run folder: config.json, checkpoints/model.tar and a weights_3200.tar."""
+    path, _, _, metadata, _, _ = saved_run(hand_model, tmp_path / 'scratch')
+    run = run_dir.RunDir(tmp_path / 'runs' / 'parent')
+    run.write_config({'arm': metadata['arm']})
+    metadata = dict(metadata, run=dict(xpid='parent', run_dir=str(run.path)))  # as train() records it
+    states = dmc.read_checkpoint(path)
+    torch.save(dict(states, cs230=metadata), run.checkpoint_path)
+    dmc.save_weights(str(run.path / 'checkpoints' / 'weights_3200.tar'), states, metadata)
+    return run.path
+
+
+def fork_flags(hand_model, tmp_path, parent_checkpoint, *extra):
+    return arm_flags(hand_model, tmp_path, '--fork_from_checkpoint', str(parent_checkpoint),
+                     '--fork_reason', '  probe the belief  ', *extra)
+
+
+def test_resume_refuses_a_code_change_and_points_to_the_fork(tmp_path):
+    path, flags, _, metadata, _, _ = saved_run('next', tmp_path)
+    assert dmc.check_resume(dmc.read_checkpoint(path), metadata, flags, path) is False  # same code: no override used
+    for changes, field in ((dict(commit='b' * 40), 'commit'), (dict(code_sha256='f' * 64), 'code_sha256')):
+        with pytest.raises(ValueError, match='--fork_from_checkpoint') as error:
+            dmc.load_checkpoint_states(path, other_code(metadata, **changes), flags)
+        assert field in str(error.value)  # the message says what differs
+
+
+def test_resume_refuses_an_unknown_git_state_on_either_side(tmp_path):
+    path, flags, _, metadata, _, _ = saved_run('next', tmp_path)
+    unknown = dict(commit=None, branch=None, dirty=None, untracked={}, diff_sha256=None, code_sha256=None)
+    with pytest.raises(ValueError, match='unknown'):
+        dmc.check_resume(dmc.read_checkpoint(path), dict(metadata, git=unknown), flags, path)
+    states = dmc.read_checkpoint(path)
+    states['cs230'] = dict(states['cs230'], git=unknown)
+    with pytest.raises(ValueError, match='unknown'):
+        dmc.check_resume(states, metadata, flags, path)
+
+
+def test_unsafe_override_resumes_across_a_code_change_but_keeps_the_other_checks(tmp_path):
+    path, flags, _, metadata, _, _ = saved_run('next', tmp_path)
+    states = dmc.read_checkpoint(path)
+    flags.unsafe_resume_across_code_change = True
+    assert dmc.check_resume(states, other_code(metadata, code_sha256='f' * 64), flags, path) is True  # accepted, reported
+    assert dmc.check_resume(states, metadata, flags, path) is False  # nothing to override: the code is the same
+    changed_lr = copy.copy(flags)
+    changed_lr.learning_rate = 1e-3
+    with pytest.raises(ValueError, match='learning_rate'):
+        dmc.check_resume(states, other_code(metadata, code_sha256='f' * 64), changed_lr, path)
+    with pytest.raises(ValueError, match='unknown'):  # an unknown code identity is refused even with the override
+        dmc.check_resume(states, other_code(metadata, dirty=None, commit=None), flags, path)
+
+
+def test_load_arm_checkpoint_exposes_the_invalid_flag(tmp_path):
+    path = saved_run('next', tmp_path)[0]
+    assert models.load_arm_checkpoint(path)['metadata']['invalid_for_final_results'] is False
+    checkpoint = torch.load(path, weights_only=True)
+    torch.save(dict(checkpoint, cs230=dict(checkpoint['cs230'], invalid_for_final_results=True)), tmp_path / 'bad.tar')
+    assert models.load_arm_checkpoint(str(tmp_path / 'bad.tar'))['metadata']['invalid_for_final_results'] is True
+    older = {k: v for k, v in checkpoint['cs230'].items() if k not in ('invalid_for_final_results', 'fork')}
+    torch.save(dict(checkpoint, cs230=older), tmp_path / 'older.tar')  # written before the flag existed
+    assert models.load_arm_checkpoint(str(tmp_path / 'older.tar'))['metadata']['invalid_for_final_results'] is False
+
+
+def test_fork_flags_are_checked(tmp_path):
+    parent = str(parent_run(tmp_path) / 'checkpoints' / 'model.tar')
+    base = ['--actor_device_cpu', '--training_device', 'cpu', '--hand_model', 'none']
+    dmc.check_flags(parser.parse_args(base + ['--fork_from_checkpoint', parent, '--fork_reason', 'x']))
+    for args in (['--fork_from_checkpoint', parent],                                  # no reason
+                 ['--fork_from_checkpoint', parent, '--fork_reason', '   '],         # a blank reason
+                 ['--fork_reason', 'x'],                                             # a reason without a fork
+                 ['--fork_from_checkpoint', parent, '--fork_reason', 'x', '--load_model'],
+                 ['--fork_from_checkpoint', parent, '--fork_reason', 'x', '--warm_start_dir', str(ADP_DIR)],
+                 ['--unsafe_resume_across_code_change']):                            # only with --load_model
+        with pytest.raises(ValueError):
+            dmc.check_flags(parser.parse_args(base + args))
+    dmc.check_flags(parser.parse_args(base + ['--load_model', '--unsafe_resume_across_code_change']))
+
+
+def test_fork_record_names_the_parent_and_its_code(tmp_path):
+    parent = parent_run(tmp_path)
+    checkpoint = parent / 'checkpoints' / 'model.tar'
+    flags = fork_flags('derived_both', tmp_path, checkpoint)
+    metadata = dmc.run_metadata(flags, models.load_predictors('derived_both', flags.predictor_dir))
+    states, record = dmc.read_fork_parent(flags.fork_from_checkpoint, metadata, flags)
+    assert record['parent_run_id'] == dict(xpid='parent', run_dir=str(parent.resolve()))
+    assert record['parent_checkpoint'] == dict(path=str(checkpoint.resolve()), sha256=models.file_sha256(checkpoint))
+    assert record['parent_frames'] == 3200 and record['parent_hand_model'] == 'next'
+    assert record['parent_code'] == dict(commit=metadata['git']['commit'], code_sha256=metadata['git']['code_sha256'])
+    assert record['reason'] == 'probe the belief' and record['optimizer_state_restored'] is True
+    assert record['parent_fork'] is None and record['actor_lineage'] == int(record['parent_checkpoint']['sha256'][:8], 16) | 1
+    record = dmc.read_fork_parent(flags.fork_from_checkpoint, other_code(metadata, code_sha256='f' * 64), flags)[1]
+    assert record['current_code']['code_sha256'] == 'f' * 64 and record['parent_code']['code_sha256'] != 'f' * 64
+    flags.fork_from_checkpoint = str(parent / 'checkpoints' / 'weights_3200.tar')
+    assert dmc.read_fork_parent(flags.fork_from_checkpoint, metadata, flags)[1]['optimizer_state_restored'] is False
+
+
+def test_a_copied_parent_checkpoint_still_names_its_own_run(tmp_path):
+    parent = parent_run(tmp_path)
+    copy = tmp_path / 'elsewhere' / 'model.tar'
+    copy.parent.mkdir()
+    shutil.copy(parent / 'checkpoints' / 'model.tar', copy)
+    flags = fork_flags('derived_both', tmp_path, copy)
+    metadata = dmc.run_metadata(flags, models.load_predictors('derived_both', flags.predictor_dir))
+    record = dmc.read_fork_parent(flags.fork_from_checkpoint, metadata, flags)[1]
+    assert record['parent_run_id'] == dict(xpid='parent', run_dir=str(parent.resolve()))  # from the file, not its folder
+    assert record['parent_checkpoint']['path'] == str(copy.resolve())
+
+
+def test_a_fork_of_a_fork_keeps_its_ancestry_and_its_own_actor_streams(tmp_path):
+    parent = parent_run(tmp_path)
+    flags = fork_flags('derived_both', tmp_path, parent / 'checkpoints' / 'model.tar')
+    metadata = dmc.run_metadata(flags, models.load_predictors('derived_both', flags.predictor_dir))
+    first = dmc.read_fork_parent(flags.fork_from_checkpoint, metadata, flags)[1]
+    states = dmc.read_checkpoint(flags.fork_from_checkpoint)
+    child = tmp_path / 'child.tar'  # a checkpoint of the first fork
+    torch.save(dict(states, cs230=dict(states['cs230'], fork=first, warm_start=dict(dir='/adp', files={}))), child)
+    second = dmc.read_fork_parent(str(child), metadata, flags)[1]
+    assert second['parent_fork'] == first and second['parent_warm_start'] == dict(dir='/adp', files={})
+    assert second['actor_lineage'] != first['actor_lineage'] != 0
+
+
+def test_a_fork_is_refused_inside_its_parent_folder(tmp_path):
+    parent = parent_run(tmp_path)
+    before = tree(parent)
+    flags = fork_flags('next', tmp_path, parent / 'checkpoints' / 'model.tar', '--savedir', str(parent / 'forks'))
+    flags.allow_dirty = True
+    with pytest.raises(ValueError, match='inside'):
+        dmc.train(flags)
+    assert tree(parent) == before
+
+
+def test_a_fork_needs_a_parent_with_the_same_network_shape(tmp_path):
+    flags = fork_flags('derived_both', tmp_path, parent_run(tmp_path, 'baseline') / 'checkpoints' / 'model.tar')
+    metadata = dmc.run_metadata(flags, models.load_predictors('derived_both', flags.predictor_dir))
+    with pytest.raises(ValueError, match='belief_dim'):  # a DouZero parent has no belief input
+        dmc.read_fork_parent(flags.fork_from_checkpoint, metadata, flags)
+    oracle = arm_flags('oracle', tmp_path / 'oracle')
+    oracle_metadata = dmc.run_metadata(oracle, {})
+    oracle.fork_reason = 'compare arms'
+    oracle.fork_from_checkpoint = str(parent_run(tmp_path / 'next_parent') / 'checkpoints' / 'model.tar')
+    record = dmc.read_fork_parent(oracle.fork_from_checkpoint, oracle_metadata, oracle)[1]
+    assert record['parent_hand_model'] == 'next'  # another arm with the same shape is allowed; the record says so
+
+
+def test_a_refused_fork_writes_nothing_into_the_parent_or_the_new_folder(tmp_path):
+    parent = parent_run(tmp_path)
+    before = tree(parent)
+    flags = fork_flags('derived_both', tmp_path, parent / 'checkpoints' / 'model.tar', '--xpid', 'child')
+    flags.allow_dirty = True
+    run = run_dir.RunDir(tmp_path / 'runs' / 'in_use')  # a folder in use is refused for a fork, as for any new run
+    run.write_config({'arm': 'M0c'})
+    in_use = tree(run.path)
+    flags.xpid = 'in_use'
+    with pytest.raises(FileExistsError):
+        dmc.train(flags)
+    flags.xpid = 'child'
+    flags.hand_model, flags.predictor_dir = 'baseline', None  # no belief input: not the parent M1's network shape
+    with pytest.raises(ValueError, match='belief_dim'):  # a parent with another network shape, from a new folder
+        dmc.train(flags)
+    assert not (tmp_path / 'runs' / 'child').exists()
+    assert tree(parent) == before and tree(run.path) == in_use  # neither folder gained or lost a file or folder
+
+
+def test_the_summary_shows_the_fork_and_the_invalid_flag(tmp_path):
+    flags = arm_flags('none', tmp_path)
+    metadata = dmc.run_metadata(flags, models.load_predictors('none', None))
+    clean = dict(commit='a' * 40, branch='main', dirty=False, untracked={}, diff_sha256='d0', code_sha256='c0')
+    fork = dict(parent_run_id=dict(xpid='parent', run_dir='/runs/parent'),
+                parent_checkpoint=dict(path='/runs/parent/checkpoints/model.tar', sha256='p0'), parent_frames=3200,
+                parent_hand_model='next', parent_code=dict(commit='b' * 40, code_sha256='c0'),
+                current_code=dict(commit='a' * 40, code_sha256='c1'), reason='probe the belief',
+                optimizer_state_restored=True)
+    config = run_dir.run_config(flags, dict(metadata, fork=fork))
+    stats, updates = {}, {p: 0 for p in POSITIONS}
+
+    def summary(attempts, invalid=False):
+        config['metadata']['invalid_for_final_results'] = invalid
+        return run_dir.summary_markdown(config, attempts, 'completed', 1.0, 0, updates, stats, 'x')
+
+    text = summary([dict(git=clean)])
+    forked = next(line for line in text.splitlines() if line.startswith('- **Forked from:**'))
+    for part in ('/runs/parent', '/runs/parent/checkpoints/model.tar', 'p0', '3200', 'probe the belief', 'b' * 40, 'c1'):
+        assert part in forked
+    warnings = next(line for line in text.splitlines() if line.startswith('- **Warnings:**'))
+    assert 'forked from a `--hand_model next` run' in warnings and 'INVALID' not in warnings
+    flagged = summary([dict(git=clean, invalid_for_final_results=True)])
+    warnings = next(line for line in flagged.splitlines() if line.startswith('- **Warnings:**'))
+    assert warnings.startswith('- **Warnings:** INVALID FOR FINAL RESULTS:')  # sticky: a later attempt says so too
+    assert 'INVALID' in next(line for line in summary([dict(git=clean)], invalid=True).splitlines()
+                             if line.startswith('- **Warnings:**'))
+
+
+def test_a_resume_across_a_code_change_is_refused_before_anything_is_written(tmp_path, monkeypatch):
+    path, _, _, metadata, _, _ = saved_run('next', tmp_path)
+    flags = arm_flags('next', tmp_path, '--load_model')
+    flags.allow_dirty = True
+    run = run_dir.RunDir(tmp_path / 'runs' / 'run_next')
+    run.write_config({'arm': 'M1'})
+    shutil.copy(path, run.checkpoint_path)
+    monkeypatch.setattr(run_dir, 'git_info', lambda *args: dict(metadata['git'], code_sha256='f' * 64))
+    before = tree(run.path)
+    with pytest.raises(ValueError, match='code_sha256'):
+        dmc.train(flags)
+    assert tree(run.path) == before  # no attempt, metrics or summary was written
+
+
+def test_a_fork_starts_its_learner_and_actors_from_the_parent_weights(tmp_path):
+    path, _, _, _, learner, optimizers = saved_run('next', tmp_path)
+    states = dmc.read_checkpoint(path)
+    flags = arm_flags('next', tmp_path / 'fork', '--learning_rate', '0.001')
+    actors, forked, forked_optimizers = dmc.initial_models(flags, ['cpu'], states)
+    for position in POSITIONS:
+        original, start = learner.get_model(position).state_dict(), forked.get_model(position).state_dict()
+        assert all(torch.equal(original[k], start[k]) for k in original)
+        actor = actors['cpu'].get_model(position).state_dict()
+        assert all(torch.equal(original[k], actor[k]) for k in original)
+        before, after = optimizers[position].state_dict()['state'], forked_optimizers[position].state_dict()['state']
+        assert before.keys() == after.keys() and all(torch.equal(before[i][n], after[i][n]) for i in before for n in before[i])
+        assert forked_optimizers[position].param_groups[0]['lr'] == 0.001  # the fork's own learning rate, not the parent's
+    weights_only = {k: v for k, v in states.items() if k != 'optimizer_state_dict'}  # a weights_<frames>.tar fork
+    _, _, fresh = dmc.initial_models(flags, ['cpu'], weights_only)
+    assert all(fresh[position].state_dict()['state'] == {} for position in POSITIONS)

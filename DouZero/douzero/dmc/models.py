@@ -268,6 +268,8 @@ def load_arm_checkpoint(path, predictor_dir=None, device='cpu', allow_untrained=
     metadata = checkpoint.get('cs230') if isinstance(checkpoint, dict) else None
     if not metadata:
         raise ValueError('{} has no run metadata; it is not a checkpoint of this study'.format(path))
+    # Runs written before the flag existed count as valid; a fork's flag comes from its parent or its own resume.
+    metadata = dict(metadata, invalid_for_final_results=metadata.get('invalid_for_final_results', False))
     q_networks = {}
     for position in POSITIONS:
         q_network = model_dict[position](belief_dim=metadata['belief_dim'])
