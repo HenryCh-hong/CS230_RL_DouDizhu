@@ -36,11 +36,11 @@ The workload is small, but the Mac is for correctness checks only, so it runs re
 - **G. Storage size.** ≈ 1.3 GB raw `.npy` on the instance. It stays there: only `manifest.json` (the
   seeds, every deal hash and file sha256) comes back.
 - **H. Generation runtime.** ≈ 3 min expected (1.0e6 × ≈1.2 ms per AWS core ÷ 14 workers), ≤ 10 min
-  worst case; the step timeout is 40 min.
+  worst case; the step timeout is 30 min.
 - **I. K=1 training runtime.** Early stopping should end each seat after 3–10 epochs. That is ≈ 5 min
-  expected for all three seats, ≤ 15 min if every seat runs to 20,000 steps; the step timeout is 75 min.
+  expected for all three seats, ≤ 15 min if every seat runs to 20,000 steps; the step timeout is 60 min.
 - **J. K=2 training runtime.** In parallel with K=1: ≈ 8 min expected, ≤ 20 min worst case; the step
-  timeout is 75 min.
+  timeout is 60 min.
 - **K. Total cost.**
   - Wall time: setup ≈ 8 min, unit tests 1 min, data 3 min, training 8 min, packing 1 min, so about
     25 min expected and ≤ 45 min worst case.
