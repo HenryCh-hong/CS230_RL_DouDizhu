@@ -94,10 +94,13 @@ Then open the `.html` file in a browser. Useful options:
 - `replay_M2c_seed1_teaching.html` (+ `.json`): every hand revealed;
 - `replay_M2c_seed1_normal.html` (+ `.json`): only what each acting player knows;
 - `state_comparison_seed1_t13_teaching.html` and `state_comparison_seed1_t13_normal.html` (+ `.json`):
-  decision t = 13 (landlord_down leads freely, 11 legal moves), five arms, in each mode.
+  decision t = 13 (landlord_down leads freely, 11 legal moves), five arms, in each mode;
+- `stage4_tiny_k1/` and `stage4_tiny_k2/`: the plots page, the examples page, `summary.md` and
+  `metrics.csv` of the two tiny predictor runs (§7).
 
-The samples use the real DouZero-ADP warm start for the Q-network and **untrained** predictors,
-because Stage 4 has not trained any yet. Their beliefs are therefore noise, and the pages say so in red.
+The samples use the real DouZero-ADP warm start for the Q-network. Their predictors are the K=1 and
+K=2 predictors of the **tiny** local Stage 4 run (about 740 training samples per seat). That makes
+them pipeline checks, not predictors, and the pages say so in red.
 
 ## 5. How to read the replay
 
@@ -187,29 +190,49 @@ What the sample shows, and why it matters:
   looking. Even so, Stage 4 should report the uniform baseline next to card counting, and break CE
   down by game phase. Otherwise "beats card counting" may be a weaker claim than it sounds.
 
-## 7. Training curves (designed now, built with the first real runs)
+## 7. Training curves: the predictor run pages (built in Stage 4)
 
-RL runs already write `metrics.csv` every 5 s: time, frames, fps, and per seat the update count,
-loss, Q mean, Q std, gradient norm, clipping and mean episode return. Stage 4's predictor runs will
-write their own `metrics.csv`: step or epoch, train CE, validation CE, card-counting CE,
-CE_next and CE_other (K=2), expected-count MAE, learning rate and wall time.
+Every predictor run (`train_predictor.py`) writes `plots/index.html` and `plots/examples.html` into
+its run folder. They are drawn from the raw `metrics.csv`, `baselines.json` and `test_metrics.json`,
+which stay the source of truth. The charts are inline SVG with no plotting library, and every chart
+has a legend, hover tooltips on each mark, and a table of its numbers.
+- **Learning curves, per seat.** Train CE and validation CE against step. The validation-split
+  hypergeometric and legal-uniform CEs are drawn as dashed, labelled reference lines, and the
+  selected step is marked.
+- **Selected predictors against both baselines.** Bars for model, hypergeometric and legal-uniform
+  CE on the validation split, per seat.
+- **Per game phase.** The same three bars for early, mid and late, per seat.
+- **K=2 only.**
+  - CE_next and CE_other against step.
+  - The conservation violation (cards per kind) and the reflect distance (total variation), each in
+    its own chart, because they are different units and never share an axis.
+- **Test split.** A table, scored once after selection.
+- **`examples.html`.** On validation decisions spread through the split, the true count against the
+  legal-uniform, hypergeometric and learned beliefs, as P(copies) bars for the kinds with the most
+  unseen copies, with each belief's CE.
 
-The plan is one small script, `plot_run.py <run_dir>`. It reads a run's raw CSV and writes PNGs
-plus a `plots/index.html` into `artifacts/runs/<run_id>/plots/`, keeping the CSV as the source of truth:
-- **RL:**
-  - Q-loss per seat;
-  - Q mean ± std;
-  - gradient norm with the clipping rate;
-  - fps;
-  - validation ADP and WP, once evaluation is wired;
-  - all against frames.
-- **Predictor:**
-  - train and validation CE against step, with the card-counting CE as a horizontal reference;
-  - CE_next and CE_other;
-  - MAE;
-  - learning rate.
+**Colours.** The model is blue, card counting orange and legal-uniform aqua; CE_next is blue and
+CE_other magenta. Both sets passed a palette validator for colour-blind separation
+in light and dark mode. Aqua and magenta are below 3:1 contrast in light mode, which is why every
+chart has direct labels and a numbers table. Blue with violet failed the validator and is not used.
 
-It will run on the laptop only on small existing logs. Heavy training never runs just to make plots.
+RL runs already write `metrics.csv` every 5 s: Q-loss, Q mean and std, gradient norm, clipping,
+fps, frames and wall time. The same chart code will draw them once real RL runs exist. Validation
+ADP and WP come once evaluation is wired. Heavy training never runs just to make plots.
+
+## 7b. What the predictor learned beyond counting (replay and comparison)
+
+Every replay decision and every comparison slot has a **beyond-counting** panel. For the four
+kinds with the most unseen copies, it shows P(0..u copies) as bars for:
+- legal-uniform (knows only the feasible range);
+- hypergeometric card counting (also knows the hand size and assumes a random deal);
+- the arm's learned or derived belief.
+
+The expected count is shown under each bar group. In teaching mode the panel adds the true count:
+a dashed orange outline on that count's bar in every row, a "true count" row, and each belief's CE
+over all 15 kinds. Normal mode keeps the same panel without any truth. A learned belief is worth
+having only where it beats both baselines, and that is what this panel lets you see for one
+decision.
 
 ## 8. Outputs that a later dashboard can use
 
@@ -228,22 +251,53 @@ and a `game_id`, so a dashboard can index them without re-running anything.
 
 ## 9. Limitations of the prototype
 
-- **Untrained predictors.** No trained predictors and no trained RL checkpoints exist yet, so the
-  beliefs are noise and the arms' Q rankings are identical. The tools already accept trained
-  predictors, and `compare_state` accepts per-arm Q-networks. Loading a trained `model.tar` per
-  arm from the command line is still to add.
-- **Size.** A page holds every decision's tables, about 430 KB per game. That is fine for single
-  games but not for thousands.
+- **No real predictors yet.** The only trained predictors come from the tiny local run, and no
+  trained RL checkpoints exist, so the arms' Q rankings are still identical. The tools accept real
+  predictors as soon as Stage 4 runs on AWS, and `compare_state` accepts per-arm Q-networks. Loading
+  a trained `model.tar` per arm from the command line is still to add.
+- **Size.** A replay page holds every decision's tables and focus panels, about 800 KB per game.
+  That is fine for single games but not for thousands.
 - **Only actor 0's first game of a CPU-actor run is replayed** (by seed). Replaying an arbitrary game
   from a run's evaluation, or a GPU actor's game, is not wired yet.
 - **The comparison scores moves greedily** (ε = 0) to compare rankings. The replay shows the real
   ε-greedy choice.
-- **No plots yet** (§7 is a design).
+- **RL plots** reuse the predictor chart code, once real RL runs exist.
 - **No live training dashboard,** by design for now.
 
 ## 10. Next steps, after approval
 
-1. `plot_run.py` for RL and predictor `metrics.csv`, tried on the existing integration-test logs.
+1. RL run pages from `metrics.csv`, with the predictor run pages' chart code.
 2. A `--arm_checkpoint ARM=path/model.tar` option for the comparison, used once trained arms exist.
 3. Sample replays and comparisons written into each run folder at the end of a run, from a fixed
    set of seeds, so every run summary links to the same states.
+
+## 11. The pixel-style theme
+
+**The visual language.** A retro card-table look:
+- a parchment table (dark slate in dark mode);
+- panels with a blocky 2-pixel frame and a hard 4-pixel drop shadow;
+- square cards and chips, with a small hard shadow on each card;
+- buttons that press in when clicked;
+- headings, labels and buttons in monospace capitals;
+- square seat ticks;
+- a checkerboard texture for card backs.
+
+**Where it is used.** Every generated page uses it: the replay, the state comparison and the predictor
+run pages. One module, `douzero/pages.py`, defines it, so all pages look alike.
+
+**How readability is kept.**
+- **Body text stays in the system font** at 14 px, and numbers in tables stay plain. Only headings,
+  labels and buttons are monospace.
+- **No pixel font is embedded,** so pages stay offline and the text stays crisp.
+- **Every information class has a colour and a second cue that is not colour:**
+  - the actor's own cards: solid green border;
+  - public cards: solid blue border;
+  - hidden truth (teaching only): dashed orange border on a hatched ground;
+  - belief sources: labelled chips (predicted, derived, learned, oracle with a "!", zero,
+    legal-uniform, card counting).
+- **The two modes are distinct.**
+  - Teaching pages open with an orange-and-brown hazard-striped banner: "TEACHING MODE · hidden
+    truth revealed".
+  - Normal pages open with a plain blue banner: "NORMAL MODE · only what the acting player knows".
+- **Where style and clarity conflicted, clarity won.** There is no pixel font, no animation and no
+  low-contrast text. The checked chart palette is unchanged under the theme.

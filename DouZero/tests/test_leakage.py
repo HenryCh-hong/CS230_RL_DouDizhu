@@ -287,8 +287,9 @@ SOURCE_FILES = sorted(path.relative_to(REPO_ROOT).as_posix() for path in REPO_RO
 # Adding a file to these sets is a reviewed decision: that file can see the true hidden hands.
 MENTIONS_ALL_HANDCARDS = {'douzero/env/game.py',         # the engine fills InfoSet.all_handcards
                           'douzero/env/hand_belief.py'}  # hand_labels(), the only reader
-MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # later: predictor-data generation
+MENTIONS_HAND_LABELS = {'douzero/env/hand_belief.py',    # defines it
                         'douzero/dmc/oracle.py',         # oracle_labels(), the oracle arm's one access point
+                        'douzero/predictor/data.py',     # Stage 4 dataset: the training labels, stored as counts
                         'trace_decision.py'}             # debug trace: shows the labels, runs the oracle arm
 # Each caller of oracle_labels can hand true hands to the oracle arm, so each is a reviewed oracle path.
 MENTIONS_ORACLE_LABELS = {'douzero/dmc/oracle.py',               # defines it

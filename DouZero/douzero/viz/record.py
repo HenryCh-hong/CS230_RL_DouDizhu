@@ -180,6 +180,23 @@ def warm_started_model(hand_model, checkpoint_dir, seed=0):
     return model, source or 'RANDOM DouZero weights (no checkpoint found)'
 
 
+def predictor_label(predictor_dir, predictors):
+    """Where frozen predictors came from, for the page header; tiny or untrained ones are flagged in capitals."""
+    provenances = {seat: p.provenance or {} for seat, p in predictors.items() if p is not None}
+    provenance = next(iter(provenances.values()))
+    if not all(p.get('trained') for p in provenances.values()):
+        return 'UNTRAINED predictors from ' + predictor_dir
+    counts = {seat: p.get('train_samples') for seat, p in provenances.items()}
+    samples = None if None in counts.values() else min(counts.values())
+    detail = ', '.join(part for part in (
+        'Stage 4 run {}'.format(provenance['run_id']) if provenance.get('run_id') else '',
+        'selected at step {}'.format(provenance['selected_step']) if 'selected_step' in provenance else '',
+        'training samples per seat ' + ' / '.join('{} {}'.format(seat, n) for seat, n in counts.items())
+        if samples is not None else '') if part)
+    tiny = ('; TINY pipeline-check data: not a real predictor' if samples is not None and samples < 10000 else '')
+    return 'frozen, from {} ({}{})'.format(predictor_dir, detail or 'trained', tiny)
+
+
 def untrained_predictors(num_targets, seed):
     """Seeded untrained predictors for every seat; record_episode and compare_state use the same seed."""
     with torch.random.fork_rng(devices=[]):
@@ -206,7 +223,7 @@ def record_episode(hand_model='derived_both', seed=0, predictor_dir=None, checkp
     if num_targets and predictors is None:
         if predictor_dir:
             predictors = models.load_predictors(hand_model, predictor_dir, require_trained=False)
-            predictor_source = 'frozen, from ' + predictor_dir
+            predictor_source = predictor_label(predictor_dir, predictors)
         else:
             predictors, predictor_source = untrained_predictors(num_targets, seed), UNTRAINED
     predictors = predictors or {p: None for p in POSITIONS}
@@ -309,7 +326,7 @@ def rebuild_state(record, t):
 
 
 def compare_state(record, t, k1_predictors=None, k2_predictors=None, checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
-                  reveal=None, arm_models=None):
+                  reveal=None, arm_models=None, k1_source=None, k2_source=None):
     """Every arm's belief input and action ranking at decision t of a recorded game.
 
     M1 and M2c share the one K=1 predictor (k1_predictors), as in the experiment; M2 has its own
@@ -322,7 +339,8 @@ def compare_state(record, t, k1_predictors=None, k2_predictors=None, checkpoint_
         raise ValueError('reveal=True needs a record made with reveal=True')
     state = rebuild_state(record, t)
     infoset, position, obs = state.infoset, state.position, state.obs
-    k1_source = k2_source = 'given by the caller'
+    k1_source = k1_source or 'given by the caller'
+    k2_source = k2_source or 'given by the caller'
     if k1_predictors is None:
         k1_predictors, k1_source = untrained_predictors(1, record['seed']), UNTRAINED
     if k2_predictors is None:

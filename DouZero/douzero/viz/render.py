@@ -5,37 +5,16 @@ game, and every step still readable, one after another, without JavaScript. NORM
 only what the acting player knows; TEACHING mode (reveal) adds the hidden ground truth, drawn
 with dashed orange borders so it can never be mistaken for public information.
 """
-from html import escape
-
 from douzero.env import hand_belief as hb
+from douzero.pages import FACES, backs_html, belief_focus_html, cards_html, e, page, top_kinds
 from douzero.viz.record import strip_comparison, strip_hidden
 
-FACES = dict(zip(hb.KINDS, ('3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2', 'BJ', 'RJ')))
 ROLE = {'landlord': 'Landlord', 'landlord_down': 'Peasant', 'landlord_up': 'Peasant'}
 SEAT_NOTE = {'landlord': 'plays first and started with 20 cards',
              'landlord_down': 'plays right after the landlord',
              'landlord_up': 'plays right before the landlord'}
 LAYOUT = ('landlord_up', 'landlord', 'landlord_down')  # top, left, right; the public table sits in the middle
 ARM_ORDER = ('none', 'next', 'derived_both', 'learned_both', 'oracle')
-
-
-def e(value):
-    return escape(str(value))
-
-
-# ---------------------------------------------------------------- small pieces
-
-def cards_html(cards, kind):
-    """Card chips. kind is 'own' (the actor's private hand), 'public' or 'hidden' (ground truth, teaching only)."""
-    if not cards:
-        return '<span class="cards {} empty">none</span>'.format(kind)
-    return '<span class="cards {}">{}</span>'.format(kind, ''.join(
-        '<span class="card{}">{}</span>'.format(' joker' if card >= 20 else '', FACES[card]) for card in cards))
-
-
-def backs_html(count):
-    return '<span class="cards backs" title="{} cards, hidden">{}</span>'.format(
-        count, '<span class="card back"></span>' * count)
 
 
 def move_html(cards, move_type):
@@ -198,6 +177,8 @@ def belief_panel(record, step, hidden_step):
         seat = public['hidden_seats'][index]
         rows.append(('<span class="group">{} hand: {}, {} cards</span>'.format(
             'next' if slot == 'next' else 'other', seat, public['hidden_sizes'][index]), 'group', '<td colspan="15"></td>'))
+        rows.append(('legal-uniform (reference)', 'uniform', belief_cells(uniform_summary(public['unseen']),
+                                                                          public['unseen'])))
         rows.append(('card counting (reference)', 'counting', belief_cells(step['card_counting'][slot], public['unseen'])))
         rows.append(('belief: {}'.format(e(sources[index]['text'])), sources[index]['kind'],
                      belief_cells(step['belief'][slot], public['unseen'])))
@@ -213,7 +194,50 @@ def belief_panel(record, step, hidden_step):
                          fmt(ce['belief']['next']), fmt(ce['belief']['other']),
                          fmt(ce['card_counting']['next']), fmt(ce['card_counting']['other']),
                          fmt(ce['uniform']['next']), fmt(ce['uniform']['other'])))
-    return heading + belief_table(rows, public) + ''.join(notes)
+    return heading + belief_table(rows, public) + ''.join(notes) + focus_panel(step, sources, hidden_step)
+
+
+def uniform_summary(unseen):
+    """The legal-uniform belief of one hand: every feasible count 0..u equally likely."""
+    probs = [[1 / (u + 1) if k <= u else 0.0 for k in range(hb.NUM_COUNTS)] for u in unseen]
+    return dict(probs=probs, expected=[u / 2 for u in unseen])
+
+
+def focus_rows(unseen, counting, beliefs, hidden_ce=None):
+    """Rows of a focus table: legal-uniform, card counting, then (label, css, probs, ce key) beliefs."""
+    ce = hidden_ce or {}
+    rows = [dict(label='legal-uniform', css='uniform', probs=uniform_summary(unseen)['probs'], ce=ce.get('uniform')),
+            dict(label='hypergeometric (card counting)', css='counting', probs=counting['probs'],
+                 ce=ce.get('card_counting'))]
+    return rows + [dict(label=label, css=css, probs=probs, ce=ce.get(key)) for label, css, probs, key in beliefs]
+
+
+def focus_panel(step, sources, hidden_step):
+    """What the belief learned beyond simple counting, for the kinds with the most unseen copies."""
+    public = step['public']
+    kinds = top_kinds(public['unseen'])
+    if not kinds:
+        return ''
+    parts = ['<h3>Beyond counting: P(copies) for the {} kinds with the most unseen copies</h3>'.format(len(kinds))]
+    for index, slot in enumerate(('next', 'other')):
+        ce = None
+        if hidden_step:
+            raw = hidden_step['cross_entropy']
+            ce = dict(uniform=raw['uniform'][slot], card_counting=raw['card_counting'][slot],
+                      belief=raw['belief'][slot] if raw['belief'] else None)
+        beliefs = []
+        if sources[index]['kind'] != 'zero':
+            beliefs.append(('this arm\'s belief ({})'.format(e(sources[index]['kind'])), sources[index]['kind'],
+                            step['belief'][slot]['probs'], 'belief'))
+        parts.append('<div class="label">{} hand: {}</div>'.format(slot, e(public['hidden_seats'][index])))
+        parts.append(belief_focus_html(public['unseen'], focus_rows(public['unseen'], step['card_counting'][slot],
+                                                                    beliefs, ce), kinds,
+                                       hidden_step['true_counts'][slot] if hidden_step else None))
+    parts.append('<p class="small">Bars: P(0, 1, … u copies). The legal-uniform belief knows only the feasible '
+                 'range; card counting also knows the hand size and assumes a random deal. A learned belief is '
+                 'worth having only where it beats both.{}</p>'.format(
+                     ' The dashed outline marks the true count.' if hidden_step else ''))
+    return ''.join(parts)
 
 
 def choice_panel(step):
@@ -325,14 +349,16 @@ def end_html(record, hidden):
 def header_html(title, facts, reveal):
     mode = ('<span class="badge teaching">TEACHING mode: hidden hands revealed</span>' if reveal else
             '<span class="badge normal">NORMAL mode: only what the acting player knows</span>')
-    rows = ''.join('<tr><th>{}</th><td{}>{}</td></tr>'.format(label, ' class="warn"' if 'UNTRAINED' in str(value) else '',
+    rows = ''.join('<tr><th>{}</th><td{}>{}</td></tr>'.format(label, ' class="warn"' if any(
+        flag in str(value) for flag in ('UNTRAINED', 'TINY', 'RANDOM')) else '',
                                                            value) for label, value in facts)
     legend = ('<span class="cards own"><span class="card">K</span></span> the actor\'s own hand '
               '<span class="cards public"><span class="card">K</span></span> public '
               '<span class="cards hidden"><span class="card">K</span></span> hidden truth (teaching only) '
               '<span class="chip predicted">predicted</span> <span class="chip derived">derived by conservation</span> '
               '<span class="chip learned">learned</span> <span class="chip oracle">oracle</span> '
-              '<span class="chip zero">zero</span> <span class="muted">· BJ/RJ = black/red joker</span>')
+              '<span class="chip zero">zero</span> <span class="chip uniform">legal-uniform</span> '
+              '<span class="chip counting">card counting</span> <span class="muted">· BJ/RJ = black/red joker</span>')
     terms = ('<b>Terms.</b> Slot 1 is the belief about the <i>next</i> hidden player (the one who plays right after '
              'the actor), slot 2 about the <i>other</i>. E[count] is the expected number of copies of a card in a '
              'hand. Q is the network\'s estimate of the final return of a move. ε is the exploration rate. CE is '
@@ -356,13 +382,6 @@ def nav_html(record):
                 len(steps), marks)
 
 
-def page(title, body, script=''):
-    return ''.join(['<!doctype html>\n<html lang="en"><head><meta charset="utf-8">',
-                    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-                    '<title>{}</title><style>{}</style></head><body>'.format(e(title), CSS), body,
-                    '<script>{}</script>'.format(SCRIPT) if script else '', '</body></html>\n'])
-
-
 def render_replay(record, reveal=None):
     """The whole game as one HTML page: a section per decision plus the end of the game."""
     reveal = record['revealed'] if reveal is None else reveal
@@ -381,7 +400,8 @@ def render_replay(record, reveal=None):
     body = header_html('Episode replay: {} seed {}'.format(record['arm'], record['seed']), facts, reveal)
     body += nav_html(record) + '<main>{}{}</main>'.format(
         ''.join(step_html(record, t, hidden) for t in range(len(record['steps']))), end_html(record, hidden))
-    return page('Replay {} seed {}'.format(record['arm'], record['seed']), body, script=SCRIPT)
+    return page('Replay {} seed {}'.format(record['arm'], record['seed']), body, script=SCRIPT,
+                mode='teaching' if reveal else 'normal')
 
 
 def render_comparison(comparison, reveal=None):
@@ -404,7 +424,8 @@ def render_comparison(comparison, reveal=None):
             table_html(state['seat'], public, state['own_hand'], state['history'], state['legal_count'],
                        hidden['hands'] if hidden else None)]
     for index, slot in enumerate(('next', 'other')):
-        rows = [('card counting (reference)', 'counting', belief_cells(state['card_counting'][slot], public['unseen']))]
+        rows = [('legal-uniform (reference)', 'uniform', belief_cells(uniform_summary(public['unseen']), public['unseen'])),
+                ('card counting (reference)', 'counting', belief_cells(state['card_counting'][slot], public['unseen']))]
         for hand_model in ARM_ORDER:
             arm, source = arms[hand_model], arms[hand_model]['slot_sources'][index]
             label = '<b>{}</b> {}'.format(e(arm['arm']), source_chip(source))
@@ -415,8 +436,22 @@ def render_comparison(comparison, reveal=None):
             rows.append((label, source['kind'], cells))
         if hidden:
             rows.append(('true count (hidden)', 'truth', count_cells(hidden['true_counts'][slot], public['unseen'])))
-        body.append('<div class="panel"><h3>Slot {}: belief about the {} hand ({}, {} cards)</h3>{}</div>'.format(
-            index + 1, slot, public['hidden_seats'][index], public['hidden_sizes'][index], belief_table(rows, public)))
+        focus = []
+        for hand_model in ('next', 'derived_both', 'learned_both'):
+            arm = arms[hand_model]
+            if arm['belief'] is not None and arm['slot_sources'][index]['kind'] != 'zero':
+                focus.append((e(arm['arm']), arm['slot_sources'][index]['kind'], arm['belief'][slot]['probs'],
+                              hand_model))
+        ce = None
+        if hidden:
+            ce = dict(uniform=hidden['cross_entropy']['uniform'][slot],
+                      card_counting=hidden['cross_entropy']['card_counting'][slot],
+                      **{h: hidden['cross_entropy']['by_arm'][h][slot] for h in ('next', 'derived_both', 'learned_both')})
+        kinds = top_kinds(public['unseen'])
+        body.append('<div class="panel"><h3>Slot {}: belief about the {} hand ({}, {} cards)</h3>{}{}</div>'.format(
+            index + 1, slot, e(public['hidden_seats'][index]), public['hidden_sizes'][index], belief_table(rows, public),
+            belief_focus_html(public['unseen'], focus_rows(public['unseen'], state['card_counting'][slot], focus, ce),
+                              kinds, hidden['true_counts'][slot] if hidden else None) if kinds else ''))
     # Ranks down, arms across, so a difference between two arms' rankings is visible side by side.
     masked = '<td class="muted">masked: scored with the true hands</td>'
     q_rows = ['<tr><th>rank</th>{}</tr>'.format(''.join('<th>{}</th>'.format(e(arms[h]['arm'])) for h in ARM_ORDER))]
@@ -452,67 +487,9 @@ def render_comparison(comparison, reveal=None):
                 '<div class="scroll"><table class="q arms">{}</table></div><p>{}</p></div>'.format(
                     state['legal_count'], ''.join(q_rows), same))
     body.append('</main>')
-    return page('State comparison {} t={}'.format(comparison['game_id'], comparison['t']), ''.join(body))
+    return page('State comparison {} t={}'.format(comparison['game_id'], comparison['t']), ''.join(body),
+                mode='teaching' if reveal else 'normal')
 
-
-CSS = """
-:root{--bg:#f7f6f2;--panel:#fff;--ink:#1d1f23;--muted:#5f6670;--line:#d9dce1;--own:#1f7a4d;--public:#2a5db0;
---hidden:#b4581d;--predicted:#6b46b8;--derived:#0f7f86;--learned:#a23b72;--oracle:#c0392b;--zero:#8a9099;
---sel:#f6e3a1;--seat-landlord:#c0392b;--seat-landlord_down:#2a5db0;--seat-landlord_up:#1f7a4d}
-@media (prefers-color-scheme:dark){:root{--bg:#15171a;--panel:#1e2125;--ink:#e8e9eb;--muted:#a0a6ae;--line:#3a3f46;
---own:#5cc28f;--public:#7aa7f0;--hidden:#f0a060;--predicted:#b195f0;--derived:#5cc8ce;--learned:#e07fb0;
---oracle:#f0857a;--zero:#80868e;--sel:#4d4420}}
-*{box-sizing:border-box}body{margin:0;padding:16px;background:var(--bg);color:var(--ink);
-font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
-h1{font-size:20px;margin:0 0 6px}h2{font-size:17px;margin:18px 0 8px}h3{font-size:14px;margin:0 0 6px}
-.muted{color:var(--muted)}.small{font-size:12px}.label{margin-top:8px;font-size:11px;text-transform:uppercase;
-letter-spacing:.04em;color:var(--muted)}p{margin:6px 0}
-header .facts th{text-align:left;padding-right:10px;color:var(--muted);font-weight:500;vertical-align:top}
-.warn{color:var(--oracle);font-weight:600}.legend{font-size:12px}
-.badge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:600;border:1px solid}
-.badge.acting{color:var(--own);border-color:var(--own)}.badge.teaching{color:var(--hidden);border-color:var(--hidden)}
-.badge.normal{color:var(--public);border-color:var(--public)}
-.controls{position:sticky;top:0;z-index:2;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--line);
-display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.controls button{font:inherit;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
-color:var(--ink);cursor:pointer}.controls input[type=range]{flex:1 1 200px}
-.ticks{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:2px}.tick{width:9px;height:14px;border-radius:2px;
-background:var(--line)}.tick.landlord{background:var(--seat-landlord)}.tick.landlord_down{background:var(--seat-landlord_down)}
-.tick.landlord_up{background:var(--seat-landlord_up)}.tick.explored{outline:2px solid var(--hidden);outline-offset:1px}
-.tick.end{background:var(--ink)}.tick.current{transform:scaleY(1.5)}
-.table{display:grid;grid-template-columns:1fr 1.35fr 1fr;grid-template-areas:". up ." "left center right";gap:10px}
-.seat,.center,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;min-width:0}
-.seat.landlord_up{grid-area:up}.seat.landlord{grid-area:left}.seat.landlord_down{grid-area:right}.center{grid-area:center}
-.seat.acting{border:2px solid var(--own)}.seat-key{font:12px ui-monospace,Menlo,monospace;color:var(--muted)}
-.note{font-size:11px;color:var(--muted)}.hidden-note,.truth-text{color:var(--hidden)}
-.cards{display:inline-flex;flex-wrap:wrap;gap:2px}.cards.empty{color:var(--muted);font-size:12px}
-.card{display:inline-block;min-width:22px;padding:1px 3px;border:1px solid var(--line);border-radius:4px;
-background:var(--panel);text-align:center;font:600 13px/1.3 ui-monospace,Menlo,monospace}
-.card.joker{color:var(--oracle)}.cards.own .card{border-color:var(--own);border-width:2px}
-.cards.public .card{border-color:var(--public)}.cards.hidden .card{border:2px dashed var(--hidden);color:var(--hidden)}
-.card.back{min-width:10px;height:18px;padding:0;background:repeating-linear-gradient(45deg,var(--line) 0 3px,
-transparent 3px 6px)}.pass{font-style:italic;color:var(--muted)}
-.chip{display:inline-block;padding:0 6px;border-radius:9px;font-size:11px;border:1px solid currentColor}
-.chip.predicted{color:var(--predicted)}.chip.derived{color:var(--derived)}.chip.learned{color:var(--learned)}
-.chip.oracle{color:var(--oracle)}.chip.zero{color:var(--zero)}
-.decision{display:grid;grid-template-columns:1.6fr 1fr;gap:10px;margin-top:10px}
-table{border-collapse:collapse}.kinds td,.kinds th{padding:2px 4px;text-align:center;font-size:12px;
-border-bottom:1px solid var(--line)}.kinds th:first-child{text-align:left;font-weight:500;white-space:nowrap}
-.beliefs td{background:color-mix(in srgb,var(--c,var(--public)) calc(var(--v,0)*55%),transparent)}
-.beliefs tr.counting{--c:var(--public)}.beliefs tr.predicted{--c:var(--predicted)}.beliefs tr.derived{--c:var(--derived)}
-.beliefs tr.learned{--c:var(--learned)}.beliefs tr.oracle{--c:var(--oracle)}.beliefs tr.zero{--c:var(--zero)}
-.beliefs tr.truth td,.beliefs tr.truth th{color:var(--hidden);font-weight:600}
-.beliefs tr.group th{padding-top:8px;text-transform:uppercase;font-size:11px;color:var(--muted)}
-.q td,.q th{padding:3px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.q tr.sel td{background:var(--sel)}.explore{color:var(--hidden);font-weight:600}
-.transition{border-left:3px solid var(--public);padding-left:8px}
-ol.history{margin:4px 0;padding-left:26px}ol.top{margin:0;padding-left:18px}.q-value{color:var(--muted)}
-.comparison .panel{margin-top:10px}
-body.paged section.step[hidden]{display:none}section.step{scroll-margin-top:80px}.scroll{overflow-x:auto}
-body:not(.paged) .controls>:not(.ticks){display:none}
-@media (max-width:760px){.table{grid-template-columns:1fr;grid-template-areas:"up" "left" "center" "right"}
-.decision{grid-template-columns:1fr}.kinds{display:block;overflow-x:auto}}
-"""
 
 SCRIPT = """
 (function(){

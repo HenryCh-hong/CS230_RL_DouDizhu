@@ -111,6 +111,8 @@ All arms share one code path and one Q-network. They differ only in what fills t
 | `--hand_model` | `baseline` (default: the original DouZero network, without a belief input), `none` (M0c), `next` (M1), `derived_both` (M2c), `learned_both` (M2) or `oracle` |
 | `--predictor_dir` | The `<seat>.ckpt` frozen predictors. Required by M1, M2c and M2, and rejected for the other arms |
 | `--load_model` | Resumes `<savedir>/<xpid>/checkpoints/model.tar`. Mutually exclusive with `--warm_start_dir`. The resume rules are below |
+| `--fork_from_checkpoint`, `--fork_reason` | A new run, with a new `--xpid`, started from another run's `model.tar` or `weights_<frames>.tar`, for example after a code change. The reason is required. Excludes `--load_model` and `--warm_start_dir`. See Fork below |
+| `--unsafe_resume_across_code_change` | Debugging only: lets `--load_model` resume across a code change and marks the run `invalid_for_final_results` (sticky) |
 | `--allow_untrained_predictors` | Smoke runs only. Without it, `train()` refuses predictor files that are not marked `trained`. The evaluation side refuses them the same way (`load_arm_checkpoint`, `BeliefDeepAgent`) unless `allow_untrained=True`; the evaluation CLI has no such flag yet, so it is a Python argument only. A run started with it is warned in `summary.md` |
 | `--warm_start_dir` | The DouZero checkpoints to start from. Mutually exclusive with `--load_model` |
 | `--freeze_predictor` | Default on. `--no-freeze_predictor` raises `NotImplementedError` |
@@ -174,9 +176,32 @@ Then the signal handlers are restored, a final metrics row is logged if needed, 
 **Resume rules** (`dmc.check_resume`). `--load_model` resumes `checkpoints/model.tar` of the run folder. `check_resume` refuses to resume when:
 - `hand_model` or `belief_dim` differs from the saved run;
 - the predictor files differ. They are compared by sha256, so a copied run still resumes;
-- any flag in `RESUME_FIXED_FLAGS` differs: `objective`, `unroll_length`, `batch_size`, `learning_rate`, `alpha`, `momentum`, `epsilon`, `max_grad_norm`, `exp_epsilon` and `seed`.
+- any flag in `RESUME_FIXED_FLAGS` differs: `objective`, `unroll_length`, `batch_size`, `learning_rate`, `alpha`, `momentum`, `epsilon`, `max_grad_norm`, `exp_epsilon` and `seed`;
+- **the code differs** (the project rule: resume = same experiment = same code): the saved run's git commit or `code_sha256` (tracked diff plus untracked files of `DouZero/`) differs from the current one, or either git state is unknown. The message points to `--fork_from_checkpoint`.
 
-Flags such as `--total_frames` may change, so a finished run can be extended. `training_device`, `num_actors`, `num_threads` and `disable_checkpoint` are not in `RESUME_FIXED_FLAGS`; each attempt's flags are in `attempts.jsonl`. The resume restores the optimizer state, the counters (frames, position_frames, updates, stats, elapsed_s) and the weights together. It truncates `metrics.csv` to the checkpoint's frames, because later rows describe lost progress. Its actors get fresh random streams (`flags.attempt`). The git gate runs again for every start. A resume on changed code is accepted, but `summary.md` warns and `attempts.jsonl` records each attempt's git state. Whether to refuse it is an open decision (see Open items before pilots).
+Flags such as `--total_frames` may change, so a finished run can be extended. `training_device`, `num_actors`, `num_threads` and `disable_checkpoint` are not in `RESUME_FIXED_FLAGS`; each attempt's flags are in `attempts.jsonl`. The resume restores the optimizer state, the counters (frames, position_frames, updates, stats, elapsed_s) and the weights together. It truncates `metrics.csv` to the checkpoint's frames, because later rows describe lost progress. Its actors get fresh random streams (`flags.attempt`). The git gate runs again for every start.
+
+**Fork** (`--fork_from_checkpoint PATH --fork_reason TEXT`, with a new `--xpid`). This is a new experiment initialized from an old experiment's checkpoint, the way to continue after a code change.
+- It needs a new, unused run folder and leaves the parent's folder byte-for-byte untouched (tested).
+- The learner and the actors start from the parent's weights. The optimizer state is restored when the file holds one (a `model.tar`) and set to this run's flags; a `weights_<frames>.tar` starts fresh optimizers.
+- Frames, updates, stats and `metrics.csv` start at 0.
+- The parent must have the same network shape (`belief_dim`). Its arm may differ, and `summary.md` warns when it does.
+- `config.json`, every `model.tar` and `weights_<frames>.tar`, and `summary.md` record `fork`:
+  - the parent run, read from the checkpoint's own metadata (`run`: xpid and folder), so a copied file still names its run; older checkpoints fall back to the folder, marked `inferred_from_path`;
+  - the parent checkpoint's path and sha256 (hashed from the same bytes that are loaded), its frames and arm;
+  - the parent's and the current code (commit, `code_sha256`), the reason, and whether the optimizer state was restored;
+  - the lineage: the parent's own fork record (`parent_fork`, so a fork of a fork keeps its ancestry) and the parent's warm start, which becomes the fork's `warm_start`.
+- A fork's actors get streams of their own, even with the parent's `--seed`. The actor seeds take an extra `actor_lineage` number from the parent checkpoint's hash. A resumed fork keeps it, and plain runs keep exactly the streams they had.
+- A fork whose new folder would lie inside the parent's run folder is refused.
+- `--fork_from_checkpoint` excludes `--load_model` and `--warm_start_dir`.
+- A later resume of the fork compares against the fork's own code.
+
+**What the provenance does not cover.**
+- The per-seat `<seat>_weights_<frames>.ckpt` files of a `baseline` run are plain DouZero state dicts for `evaluate.py`, with no metadata. The fork record and the invalid mark are not in them; use `model.tar` or `weights_<frames>.tar` for anything that must carry provenance.
+- `config.json` is the record of the first start. The current state, including an invalid mark, is in `attempts.jsonl` and the checkpoints.
+- After an unsafe resume, a checkpoint carries the latest code identity, and the earlier code is only in `attempts.jsonl`.
+
+**Unsafe override, for debugging only.** `--unsafe_resume_across_code_change` lets a `--load_model` resume pass the code check (the other checks stay). The run is then marked `invalid_for_final_results = true` in that attempt's `attempts.jsonl` line and in the metadata of every later checkpoint and weights file. The mark is sticky: a later resume, or a fork of the run, keeps it. `summary.md` puts `INVALID FOR FINAL RESULTS` first among its warnings, and `models.load_arm_checkpoint` returns the flag. Such a run never goes into a final table.
 
 **Checkpoint consistency.** `train()`'s `checkpoint()` passes a `progress` callback to `dmc.save_checkpoint`, which reads the frames, position_frames, updates and stats under the same locks as the weights. The checkpoint therefore never mixes an update's weights with another update's counters. In every `model.tar`, frames == unroll_length × batch_size × (sum of updates) == sum(position_frames). The integration tests check this invariant.
 
@@ -192,7 +217,6 @@ DouZero's `evaluation/deep_agent.py` `DeepAgent` now loads strictly. It refuses 
 
 **Known limitations of the Stage-3 wiring** (recorded, not fixed in Stage 3):
 - `logs.csv` (DouZero's FileWriter) is appended across attempts and never truncated, so it can hold rows of lost progress and repeat frame numbers. Use `metrics.csv`.
-- A resume on different code is accepted, flagged in `summary.md` and recorded per attempt. Whether to refuse it is still open.
 - `RESUME_FIXED_FLAGS` does not include `training_device`, `num_actors`, `num_threads` or `disable_checkpoint`. `--disable_checkpoint` on a resume truncates `metrics.csv` and then saves nothing.
 - A signal during start-up, before `install_stop_handlers`, ends the run without a summary (a window of seconds). A signal in the few bytecodes between a lock acquire and its release registration could leak a lock; the final checkpoint then times out after 60 s instead of hanging.
 - No stall watchdog: a learner that is alive but stalled is not detected during training. It is only bounded at shutdown. A learner stuck while holding its seat lock also blocks the next periodic checkpoint, and with it the main loop and its watchdog, until the run is stopped.
@@ -212,6 +236,52 @@ DouZero's `evaluation/deep_agent.py` `DeepAgent` now loads strictly. It refuses 
 - `douzero/dmc/inprocess.py` runs the real `act()` in one process for tests and tools.
 
 **Finding: a fresh optimizer takes large first steps.** The DouZero-ADP release has no optimizer state, so every arm starts with an empty RMSprop. Its running average of squared gradients starts at 0, so the first update moves each weight by about lr/√(1 − α) = 10 × lr. `trace_learner_update.py` shows Q's mean moving 0.87 → 1.01 in one step. The effect fades over about 100–300 updates. It hits all arms equally, but it means M0c is "DouZero-ADP weights with a fresh optimizer", and the warm-started policy may dip at first. Decide before the pilots whether to warm up the learning rate (or the optimizer state) for all arms.
+
+## Offline predictors (stage 4)
+
+The predictors are trained once, offline, and frozen for the main experiment. One K=1 next-hand predictor serves M1 and M2c (the same files), and one K=2 predictor serves M2. There is one network per seat, `HandPredictor(seat, K)`, as in Stage 2. The code is in `douzero/predictor/`; the command lines are `generate_predictor_data.py` and `train_predictor.py`.
+
+- **Data** (`data.py`, schema `cs230.predictor_data/1`).
+  - Frozen DouZero-ADP self-play at the actors' ε = 0.01. Each decision is one sample of the acting seat.
+  - Inputs: `x_no_action` (319/430 int8) and `z` (5×162 int8).
+  - Labels: the true next and other hands as counts, `labels` (2×15), read with `hand_labels`. The generator is the reviewed allow-listed reader (T6b). Seat-ordered card lists are never stored.
+  - Also stored: `union` (15), `sizes` (2), and `game`, `t`, `game_length`, `cards_left` and `phase`.
+  - Storage: plain `.npy` per field, seat and 500-game shard. It is byte-reproducible, memory-mappable and adds no dependency.
+
+    | format | bytes per sample | at 1e6 samples |
+    |---|---|---|
+    | raw `.npy` (chosen) | 1,264 | 1.3 GB |
+    | npz compressed | 49 | 49 MB, but zip timestamps make the bytes irreproducible |
+    | bit-packed | 207 | 207 MB |
+    | torch shards | 1,272 | 1.3 GB, pickle-based |
+
+    gzip brings raw to about 45 MB for transfer. `manifest.json` holds every file's sha256, the seed rule, the model, the git state and every game's deal hash.
+- **Splits and seeds.**
+  - Split by game: train, val and test.
+  - Each game's seeds come from `SeedSequence([23040, split index, game index])`: 128 bits for numpy and 64 for torch, a namespace of its own, apart from the actors' `[seed, device, actor, attempt]` and the evaluation's `RandomState(seed)`. A 32-bit seed would have given about a 12% chance of a repeated deal among 33,000 games.
+  - No deal may repeat, nor be an evaluation deal. `data.generate` checks this before it writes the manifest, so a failing dataset has no manifest; the result is recorded as `deal_check`, and `train_predictor` refuses a dataset without a passed one.
+  - A missing DouZero checkpoint is an error; random weights are used only when asked for explicitly (tests).
+  - The labels are those of DouZero-ADP's own play, so the predictor learns P(hand | history) under that policy. That is why predictor drift under the RL policies is measured offline (open item).
+  - The output does not depend on the number of workers.
+- **Phases.** Pre-specified, before any training: decision progress p = t / (game_length − 1). Early if p < 1/3, mid if p < 2/3, late otherwise.
+- **Baselines** (`metrics.py`), both from the actor's own knowledge:
+  - **legal-uniform**: each feasible count 0..u equally likely, 0 for impossible ones;
+  - **hypergeometric card counting**: a uniformly random subset of the unseen cards of the public size (vectorized, checked against `hand_belief.hypergeometric_belief` to 1e-12).
+
+  CE = mean over samples and kinds of −log P(true count). MAE is of the expected count. For K=2 there is also the conservation violation, mean |E[next] + E[other] − u|, and the reflect distance, mean total variation between p_other and reflect(p_next). M2 is never forced to be consistent; the inconsistency is measured.
+- **Training and selection** (`train.py`). Masked CE averaged over the predicted hands, Adam.
+  - **Selection rule, fixed before real training:** for each seat, the lowest validation CE, evaluated on the whole validation split every `eval_every` steps, the earliest on ties. Training stops after `patience` evaluations without improvement or at `max_steps`.
+  - The test split is scored once, on the selected checkpoints, after training.
+  - Planned settings: batch 256, lr 1e-3, eval every 500, patience 5, at most 20,000 steps, seed 0.
+  - The test split is read only after selection.
+  - Each test comparison (baseline − model) gets a 95% interval from a bootstrap over whole test games, because decisions of one game are correlated (`metrics.clustered_ci`).
+  - Training stops at once on a non-finite loss or validation CE.
+  - The test split may be scored by several runs, so it must never be used to choose between runs or settings; that is the validation split's job.
+  - Checkpoints carry their provenance: `trained`, the run, the seat, K, the selected step, its validation CE, the training-sample count, the data manifest's sha256, the selection rule and the git commit. They load with `models.load_predictors`.
+- **Run folder.** `config.json`, `metrics.csv` (one row per evaluation), `baselines.json`, `test_metrics.json`, `summary.md`, `checkpoints/<seat>.ckpt` and `plots/`. The plots are `index.html`, with the curves, the baselines and the per-seat and per-phase charts as inline SVG with tables, and `examples.html`, with beliefs against the truth.
+- **Local checks.** `tests/test_predictor.py` has 18 tests on a tiny seeded dataset: generation, determinism, split isolation, reload, conservation, masks, both baselines, the loader, forward and backward, overfitting one batch, a bit-identical checkpoint reload, one K=1 checkpoint serving M1 and M2c, metrics and selection, and the plots.
+
+  A tiny real run (90 games, about 740 training samples per seat) shows the pipeline end to end. It overfits within 30 steps, and its CE is at the baselines: every 95% test interval includes 0. It is a pipeline check, not a predictor.
 
 ## Conventions (`douzero/env/hand_belief.py`)
 
@@ -282,9 +352,8 @@ Every stage should make the data flow, tensor shapes, losses and training behavi
 
 These come from the stage-2 and stage-3 reviews and must be settled in the stages named.
 - **Seed variance (evaluation design).** Paired, duplicate deals remove card luck, not training-seed variance. Plan at least 3 seeds per arm and analyze paired per-seed differences, where a pair is seed s of M2c and seed s of M1. Such a pair shares only the initialization and each actor's first game (see the wiring section), so it does not control the rest of the training noise. Three seeds leave 2 degrees of freedom for seed-to-seed variance, so a paired test over 3 seeds has little power. Use a bootstrap or t-interval over seeds and report the seed-level spread. Fix the minimum detectable effect (MDE) and the deal count in advance; if the MDE needs more than 3 seeds, call 3 seeds a pilot. `--seed` fixes initialization and each actor's stream of deals and exploration, but asynchronous actors and learners still make trajectories differ, and training seeds are not deal-paired (see the wiring section).
-- **Refusing a resume on changed code (open decision).** A resume on different code is accepted, flagged in `summary.md`, and recorded per attempt in `attempts.jsonl`. Decide whether it should be refused outright, or allowed only with an explicit flag.
 - **Predictor drift (Stage 4).** Predictors are trained on DouZero-ADP self-play, and P(hand | public history) depends on the policies that produced that history, so beliefs can drift as RL changes the policy. M1 and M2c share the predictor, which keeps the primary comparison matched. Still, measure predictor CE on the current policy's games at every checkpoint. Do it **offline** from saved trajectories in a separate allow-listed script, because labels must never enter the training processes.
-- **Separate predictor-training deals from evaluation deals (Stage 4).** Record the predictor's training-deal seeds or deal-list hash in its provenance, and have evaluation assert the two sets are disjoint.
+- **Separate predictor-training deals from evaluation deals (Stage 4, partly done).** The dataset manifest records every game's seed rule and deal hash, and `generate_predictor_data.py` refuses a dataset that repeats a deal or contains one of `tools/dup_eval.py`'s evaluation deals for the checked seeds. Still to do: the evaluation stage should record its own deal seed and hash, and assert disjointness from the predictor manifest.
 - **Fresh-optimizer transient (before pilots).** See the stage-3 finding above: decide on a learning-rate or optimizer-state warm-up applied equally to all arms.
 - **M2 capacity.** Report the 1,729,099 extra predictor parameters alongside M2 vs M2c.
 - **Clipping as a possible confound.** Each update logs `clipped`. Report the fraction of clipped updates per arm, because clipping on the global gradient norm couples the belief columns' gradients to the rest of the network.
@@ -302,5 +371,11 @@ These come from the stage-2 and stage-3 reviews and must be settled in the stage
 
 1. **Done (stage 1).** `hand_belief.py` pure functions and tests T1–T6b. No change to the Q-network, actor, learner, buffers or training loop.
 2. **Done (stage 2).** The model layer: `HandPredictor`, the common 150-d belief interface, all five arms, the function-preserving warm start, stop-gradient checks, checkpoint round trips, and tests T8–T12 with the T6a extension. The trace tool and the walkthrough were added too. The actor, learner, buffers and training loop are still unchanged.
-3. **Done (stage 3), committed locally; awaiting review before stage 4.** It covers the actor, buffer, learner, checkpoint and reload wiring for all arms; the run directory, with start-up validation, resume rules, `attempts.jsonl` and checkpoint consistency; clean shutdown on SIGTERM, SIGHUP and SIGINT; the watchdog; strict loading and fail-loud evaluation (`DeepAgent`, `simulation.evaluate`); the evaluation agents; `trace_episode.py` and `trace_learner_update.py`; tests T7 and T13–T21; 188 unit tests; and 8 opt-in integration tests, which run tiny `train()` runs end to end with the current code (completion, resume, three stop signals, a killed actor). The older smoke artifact `artifacts/runs/smoke_m2c_seed0` (1 actor, 320 frames) predates the review fixes: it has no `attempts.jsonl` and no `weights_<frames>.tar`.
-4. **Next (after stage 3 is approved).** Stage 4: offline predictor dataset and training, which needs remote compute. No real RL training or large evaluation has been run.
+3. **Done and approved (stage 3).** It covers the actor, buffer, learner, checkpoint and reload wiring for all arms; the run directory, with start-up validation, resume rules, `attempts.jsonl` and checkpoint consistency; clean shutdown on SIGTERM, SIGHUP and SIGINT; the watchdog; strict loading and fail-loud evaluation (`DeepAgent`, `simulation.evaluate`); the evaluation agents; `trace_episode.py` and `trace_learner_update.py`; tests T7 and T13–T21; 188 unit tests; and 8 opt-in integration tests, which run tiny `train()` runs end to end with the current code (completion, resume, three stop signals, a killed actor). The older smoke artifact `artifacts/runs/smoke_m2c_seed0` (1 actor, 320 frames) predates the review fixes: it has no `attempts.jsonl` and no `weights_<frames>.tar`.
+4. **Done (resume and fork).** A resume across a code change is refused; `--fork_from_checkpoint` starts a new experiment from an old checkpoint; `--unsafe_resume_across_code_change` (debugging only) marks the run `invalid_for_final_results`.
+5. **Stage 4 done locally; the AWS run awaits approval.** Done locally:
+   - the dataset, baselines, phases and training pipeline, with 16 local sanity checks;
+   - a tiny real-data run (90 games, about 2,800 decisions) that shows the pipeline and textbook overfitting;
+   - the plan in `../docs/STAGE4_AWS_PROPOSAL.md`, ready but not run.
+
+   No real predictor, RL fine-tuning or large evaluation exists yet.

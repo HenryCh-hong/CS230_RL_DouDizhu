@@ -12,6 +12,8 @@ design is in `DouZero/CS230_DESIGN.md`; how training works, step by step, is in 
 - `notes/`: reading notes on the related papers. `links/`, `papers.csv` and `download_all.py` fetch the
   papers; the PDFs themselves are not in the repository.
 - `tools/`: evaluation helpers (`dup_eval.py`).
+- `cloud/`: scripts for the Stage 4 predictor run on AWS, prepared but not yet run
+  (`docs/STAGE4_AWS_PROPOSAL.md`).
 
 ## DouZero (third-party code)
 

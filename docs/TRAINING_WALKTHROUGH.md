@@ -803,3 +803,121 @@ The text traces above have two HTML counterparts, which are easier to follow whe
   belief beats it on the 26 later decisions (CE 0.67 vs 0.79 nats), though not on the 5 early ones.
   That is one game, so it is a hint, not a result. Stage 4 will report the uniform baseline too,
   with CE by game phase.
+
+## Stage 4 — How the predictor learns
+
+Stage 4 trains the hidden-hand predictors once, offline, before any RL fine-tuning:
+- one **K=1 predictor** that guesses the *next* hidden hand, shared by M1 and M2c;
+- one **K=2 predictor** that guesses *both* hidden hands, for M2.
+
+Both are frozen afterwards. The code is in `douzero/predictor/`, and `generate_predictor_data.py` and `train_predictor.py` run it.
+
+1. **It is supervised learning, not RL.** Every example comes with the right answer: the hand the
+   next player really held. The predictor is trained to put high probability on that answer, by
+   gradient descent on a loss. There is no reward, no exploration, and no choice of action
+   changes the data: the games come from a fixed policy (frozen DouZero-ADP, with the actors'
+   ε = 0.01). RL is different: an agent learns from the returns of its *own* actions, and changing
+   the policy changes the data it sees.
+2. **Where the labels come from.** While the generator plays a game, the game engine knows every
+   hand. `hand_belief.hand_labels` reads the two hidden hands of the acting player as counts per
+   kind; the leakage test allows only reviewed files to call it. The generator stores those counts
+   as the labels. It never stores the seat-ordered card lists.
+3. **Why labels are allowed in training but hidden at play time.** The labels are an answer key
+   used *after the fact*, on recorded games, to grade the predictor's guesses. They are never an
+   input. At play time the predictor sees only the public observation (`x_no_action` and `z`), and
+   the Q-network sees only the predictor's output. The leakage tests (T6, T21) and the dataset tests
+   check this.
+4. **One training sample** is one decision of one seat:
+   - the public inputs `x_no_action` (319 or 430 int8) and `z` (5 × 162 int8);
+   - the label `labels` (2 × 15 counts: next hand, other hand);
+   - `union` (the actor's 15 unseen counts, equal to next + other kind by kind) and the two public `sizes`;
+   - bookkeeping: game, `t`, `game_length` and `phase`.
+
+   A real one is shown at the end of this section.
+5. **Cross-entropy (CE).** For each card kind the predictor gives P(0, 1, 2, 3, 4 copies). The loss
+   is −log of the probability it gave the *true* count, averaged over the 15 kinds.
+   - A perfect, certain guess scores 0.
+   - Probability 0.5 on the truth scores 0.69 nats; 0.1 scores 2.30.
+   - Spreading evenly over 3 possible counts scores log 3 = 1.10.
+
+   Lower is better, and a kind with no unseen copy scores 0 for every model alike.
+6. **Why two baselines.** A number like "CE 0.75" means nothing alone.
+   - **Legal-uniform** knows only which counts are possible: for u = 2 unseen copies it says
+     [1/3, 1/3, 1/3, 0, 0].
+   - **Hypergeometric card counting** also knows the hand size, and assumes the unseen cards were
+     dealt at random.
+
+   A predictor has learned something from the *play history* (passes, kept pairs, bombs held back)
+   only where it beats both. Both are reported overall, per seat and per game phase. The phase
+   rule, fixed before any training, is decision progress t / (game_length − 1): below 1/3 early,
+   below 2/3 mid, late otherwise. The replay viewer had hinted that uniform can beat card counting
+   late in a game, which is why the second baseline is reported; that hint is not a result.
+7. **Why train, validation and test are separate.** Each has one job:
+   - the train split fits the weights;
+   - the validation split chooses the checkpoint and when to stop;
+   - the test split is scored **once**, after the choice, to estimate how good the predictor is on
+     games it has never influenced.
+
+   The splits are cut by *game*, because decisions of one game are correlated. Each game has its own
+   seed in a separate namespace, and all deal hashes are checked: no deal repeats, and none is an RL
+   evaluation deal.
+8. **What overfitting looks like.** The tiny local run (about 740 training samples per seat) shows
+   it plainly. On the landlord seat (K=1), train CE fell 0.72 → 0.50 → 0.32 → 0.20 → 0.13 over 150
+   steps, while validation CE *rose* 0.80 → 1.04 → 1.56 → 2.09 → 2.26. The network memorized its few
+   examples instead of learning anything general. With the real dataset (about 360 times more
+   data per seat) the two curves should stay close much longer.
+9. **How the checkpoint is chosen.** The rule is fixed before real training: for each seat, the
+   checkpoint with the lowest validation CE, evaluated every `eval_every` steps on the whole
+   validation split, the earliest on ties. Training stops after `patience` evaluations without
+   improvement. In the tiny runs that was step 30, the first evaluation, for every seat and both K,
+   and training stopped after 4 more. The test split and RL results never influence the choice.
+10. **Why the selected predictor is then frozen.** During RL its weights never change, for three reasons:
+    - The belief that each Q-network learns to read stays the same input throughout training.
+    - M1 and M2c receive exactly the same next-hand belief from one shared file, so their only
+      difference is the representation of the second hand.
+    - No arm can improve by quietly re-training its own predictor.
+
+    Whether the predictor still fits the games of the changing RL policy is measured offline, from
+    saved games (predictor drift, an open item).
+
+**Outputs of every predictor run** (`artifacts/runs/<run_id>/`):
+- `config.json`: the data, the hyperparameters and the selection rule;
+- `metrics.csv`: one row per evaluation with train CE, validation CE overall and by phase, both
+  baselines, MAE and, for K=2, CE_next, CE_other, the conservation violation and the reflect distance;
+- `baselines.json`;
+- `test_metrics.json`: once;
+- `checkpoints/<seat>.ckpt`: the selected predictors, with their provenance;
+- `summary.md`;
+- `plots/index.html`: learning curves against both baselines, per seat and per phase;
+- `plots/examples.html`: true counts against legal-uniform, card counting and the learned belief,
+  on validation decisions.
+
+**One real sample from the tiny local dataset** (validation split, game 2). landlord_down is
+deciding at t = 4 of a 10-decision game (mid phase: p = 4/9). `trace_predictor_example.py` prints it
+(`docs/visualization/samples/stage4_tiny_example.txt`).
+- **Input:** `x_no_action` has 430 int8 entries, 67 of them 1; `z` is 5 × 162, with 10 ones.
+- **Public:** 27 unseen cards: 3×4, 4×2, 5×2, 7, 10, J×3, Q×4, K×2, A×3, 2×4, BJ. The next hand
+  (landlord_up) holds 17 of them and the other hand (the landlord) 10.
+- **Label (answer key):** the next hand holds 3 3 3 3 4 4 5 5 7 10 J Q Q A A 2 BJ; the other holds
+  J J Q Q K K A 2 2 2.
+
+Take the kind 3 (u = 4 unseen; the next hand really holds all 4, a bomb):
+
+| belief | P(0, 1, 2, 3, 4 copies) | −log P(true = 4) | CE over all 15 kinds |
+|---|---|---|---|
+| legal-uniform | 0.20 0.20 0.20 0.20 0.20 | 1.61 | 0.87 |
+| hypergeometric card counting | 0.01 0.12 0.35 0.39 0.14 | 2.00 | 0.84 |
+| tiny K=1 predictor (738 samples) | 0.06 0.11 0.19 0.59 0.04 | 3.18 | 0.74 |
+
+Card counting assumes a random deal. With 17 of the 27 unseen cards in the next hand, it expects
+about 2.5 of the 4 threes there and gives the whole bomb only 0.14. In fact landlord_up holds the
+bomb and has passed so far. A bomb held back is exactly the kind of signal a trained predictor could
+learn from the history and counting cannot. The tiny predictor misses it too: it bets on 3 copies and
+gives the bomb 0.04, worse than both baselines on this kind. Over all 15 kinds it scores best on this
+one decision (0.74 vs 0.84 and 0.87), but one decision proves nothing: on the test split the tiny
+predictors are not reliably better than either baseline, and every 95% interval includes 0
+(`docs/visualization/samples/stage4_tiny_k1/summary.md`).
+
+**Overfit-one-batch check** (the pipeline can learn at all): a fresh predictor trained 150 Adam
+steps on the same 24 real samples drives CE from 0.872 to 0.0000, for K=1 and for K=2. Memorizing a tiny batch is the expected result; it shows the inputs, labels, masks, loss
+and gradients are wired correctly, and says nothing about generalization.

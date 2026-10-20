@@ -40,7 +40,10 @@ def main(argv=None):
     k1 = models.load_predictors('next', args.k1_predictor_dir, require_trained=False) if args.k1_predictor_dir else None
     k2 = models.load_predictors('learned_both', args.k2_predictor_dir, require_trained=False) \
         if args.k2_predictor_dir else None
-    comparison = record.compare_state(game, t, k1, k2, args.checkpoint_dir, reveal=args.reveal)
+    comparison = record.compare_state(
+        game, t, k1, k2, args.checkpoint_dir, reveal=args.reveal,
+        k1_source=record.predictor_label(args.k1_predictor_dir, k1) if k1 else None,
+        k2_source=record.predictor_label(args.k2_predictor_dir, k2) if k2 else None)
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     with open(args.out + '.json', 'w') as f:
         json.dump(comparison, f, indent=1)
